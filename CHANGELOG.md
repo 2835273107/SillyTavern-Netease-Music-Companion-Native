@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.6.1
+
+- Replaced the manual Listen Together message form with a character-generated
+  private-message reply.
+- Character replies now use the current room or player song, the latest chat
+  messages, the bound world books and the active character persona.
+- Removed the recipient ID from the success message shown in the interface.
+
 ## 1.6.0
 
 - Replaced the player playlist and track selectors with searchable playlist and

@@ -1199,26 +1199,55 @@ async function controlPlayer(action) {
     throw new Error('播放控制仅支持 play、pause、next、previous');
 }
 
-async function sendTogetherMessage() {
-    const input = element('nmcnativeTogetherMessage');
-    const message = input?.value.trim();
-    if (!message) {
-        throw new Error('请输入要发送的消息');
+function recentTogetherConversation(chat) {
+    const rows = (Array.isArray(chat) ? chat : [])
+        .filter(message => message && String(message.mes || '').trim())
+        .slice(-10)
+        .map(message => ({
+            speaker: message.is_user ? '{{user}}' : '{{char}}',
+            text: String(message.mes || '').replace(/\s+/g, ' ').trim().slice(0, 260),
+        }));
+    return rows.map(row => `${row.speaker}：${row.text}`).join('\n');
+}
+
+async function generateTogetherReply() {
+    const context = getContext();
+    const currentSong = state.currentSong || state.playerSong;
+    const songContext = currentSong
+        ? `当前一起听的歌曲是《${currentSong.songName || currentSong.name || '未知歌曲'}》${currentSong.artist ? ` - ${currentSong.artist}` : ''}。`
+        : '当前还没有读取到正在播放的歌曲。';
+    const conversation = recentTogetherConversation(context.chat);
+    const prompt = [
+        '你正在网易云音乐的一起听房间里陪伴 {{user}}。',
+        songContext,
+        conversation ? `最近的对话：\n${conversation}` : '',
+        '请以 {{char}} 的身份，回复 {{user}} 最近表达的内容。保持角色人格和说话方式，结合正在听的歌，写成一条可以直接发送的网易云文字私信。',
+        '只输出消息正文，不要加引号、角色名前缀、动作说明或解释，不超过 120 字。',
+    ].filter(Boolean).join('\n\n');
+    const reply = String(await quiet(prompt, { candidateGuard: false }))
+        .replace(/^[“”"'「」]+|[“”"'「」]+$/g, '')
+        .trim()
+        .slice(0, 500);
+    if (!reply) {
+        throw new Error('角色没有生成可发送的回复');
     }
     const result = await api('/together/send-message', {
         method: 'POST',
-        body: { message },
+        body: { message: reply },
     });
     const log = element('nmcnativeTogetherMessageLog');
     if (log) {
         const row = document.createElement('p');
         row.className = 'nmcnative-sent-message';
-        row.textContent = `我：${message}`;
+        const characterName = context.characters?.[context.characterId]?.name
+            || (context.name2 && context.name2 !== 'SillyTavern System' ? context.name2 : '角色');
+        row.textContent = `${characterName}：${reply}`;
         log.append(row);
         log.scrollTop = log.scrollHeight;
     }
-    input.value = '';
-    setMessage(`消息已发送到一起听伙伴的网易云私信（${result.sentTo}）。`, 'success');
+    setMessage('角色回复已发送到配置的网易云私信。', 'success');
+    setConnectionState('角色回复已发送', 'success');
+    return result;
 }
 
 function renderRoomPlaylist(data) {
@@ -2816,14 +2845,11 @@ function panelHtml() {
                 </details>
 
                 <details class="nmcnative-details">
-                    <summary>一起听消息</summary>
-                    <div class="nmcnative-field">
-                        <label for="nmcnativeTogetherMessage">发送给一起听伙伴</label>
-                        <textarea id="nmcnativeTogetherMessage" maxlength="500" placeholder="输入消息..."></textarea>
-                    </div>
-                    <button id="nmcnativeSendTogetherMessage" class="nmcnative-primary nmcnative-wide-button" type="button">发送消息</button>
+                    <summary>角色私信回复</summary>
+                    <p id="nmcnativeTogetherReplyContext" class="nmcnative-note">角色会结合当前歌曲、最近对话和绑定人设生成回复，不需要手动输入。</p>
+                    <button id="nmcnativeGenerateTogetherReply" class="nmcnative-primary nmcnative-wide-button" type="button">让角色回应并发送</button>
                     <div id="nmcnativeTogetherMessageLog" class="nmcnative-message-log" aria-live="polite"></div>
-                    <p class="nmcnative-note">房间聊天通过网易云私信发送给 config.json 中配置的一起听伙伴。</p>
+                    <p class="nmcnative-note">回复会通过当前网易云账号发送到配置好的私信收件人，本地记录不会同步历史消息。</p>
                 </details>
             </section>
 
@@ -3140,14 +3166,8 @@ function bindEvents() {
             setMessage('音频加载失败。歌曲可能需要会员、已下架或当前账号无权播放。', 'error');
         }
     });
-    element('nmcnativeSendTogetherMessage').addEventListener('click', () => {
-        void withBusy('正在发送消息...', sendTogetherMessage);
-    });
-    element('nmcnativeTogetherMessage').addEventListener('keydown', event => {
-        if (event.key === 'Enter' && !event.shiftKey) {
-            event.preventDefault();
-            void withBusy('正在发送消息...', sendTogetherMessage);
-        }
+    element('nmcnativeGenerateTogetherReply').addEventListener('click', () => {
+        void withBusy('角色正在回复...', generateTogetherReply);
     });
     element('nmcnativeLoadSongComments').addEventListener('click', () => {
         void withBusy('正在读取评论...', loadSongComments);
