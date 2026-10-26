@@ -35,6 +35,15 @@ function cleanText(value, maxLength = 200) {
     return String(value ?? '').replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, maxLength);
 }
 
+function cleanMessageText(value, maxLength = 500) {
+    return String(value ?? '')
+        .replace(/\r\n?/g, '\n')
+        .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim()
+        .slice(0, maxLength);
+}
+
 function emptyAccount(label = '默认账号') {
     return {
         music_u: '',
@@ -2002,7 +2011,7 @@ export async function init(router) {
             request.body?.userId || settings.user_netease_id,
             80,
         );
-        const message = cleanText(request.body?.message, 500);
+        const message = cleanMessageText(request.body?.message, 500);
         if (!/^\d{1,20}$/.test(recipientId)) {
             throw new PublicError('请先在 config.json 配置有效的 user_netease_id');
         }

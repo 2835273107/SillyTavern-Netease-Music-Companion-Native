@@ -14,7 +14,6 @@ const DEFAULT_BACKEND = '/api/plugins/netease-music-native';
 const CANDIDATE_GUARD = '候选歌曲只能来自本次搜索接口返回的结果。禁止读取、引用或调用任何接口获取当前歌单中已有的歌曲作为候选。若搜索结果中没有符合角色设定的歌，返回空 selected 数组，不要从歌单中取歌补充。';
 const WORLDBOOK_CONTEXT_LIMIT = 6000;
 const WORLDBOOK_CACHE_MS = 15000;
-const TOGETHER_REPLY_SEND_DELAY_MS = 2200;
 
 const state = {
     accounts: [],
@@ -1273,7 +1272,8 @@ function renderTogetherReplyLog() {
         row.dataset.status = status;
         row.textContent = [
             `${characterName}：${text}`,
-            status === 'pending' ? '（等待发送）' : '',
+            status === 'pending' ? '（等待合并发送）' : '',
+            status === 'merged' ? '（已合并发送）' : '',
             status === 'failed' ? '（发送失败）' : '',
         ].filter(Boolean).join(' ');
         log.append(row);
@@ -1536,59 +1536,43 @@ async function generateTogetherReply() {
     const characterName = activeCharacterName();
     state.generatedTogetherReplies = messages.map(text => ({ text, status: 'pending' }));
     renderTogetherReplyLog();
-    const sentMessages = [];
-    const failures = [];
-    for (let index = 0; index < messages.length; index += 1) {
-        if (index > 0) {
-            setConnectionState(
-                `${characterName} 正在等待网易云接收上一条消息...`,
-                'loading',
-            );
-            await new Promise(resolve => window.setTimeout(resolve, TOGETHER_REPLY_SEND_DELAY_MS));
+    const combinedMessage = messages.join('\n\n').slice(0, 500);
+    setConnectionState(`${characterName} 正在合并为一条私信发送...`, 'loading');
+    try {
+        await api('/together/send-message', {
+            method: 'POST',
+            body: { message: combinedMessage, userId: String(contact.id) },
+        });
+        for (const reply of state.generatedTogetherReplies) {
+            reply.status = 'merged';
         }
-        setConnectionState(
-            `${characterName} 正在发送第 ${index + 1}/${messages.length} 条...`,
-            'loading',
-        );
-        try {
-            await api('/together/send-message', {
-                method: 'POST',
-                body: { message: messages[index], userId: String(contact.id) },
-            });
-            sentMessages.push(messages[index]);
-            state.generatedTogetherReplies[index].status = 'sent';
-            state.messageHistory.push({
-                id: `local-${Date.now()}-${index}`,
-                sender: 'character',
-                senderName: characterName,
-                text: messages[index],
-                time: Date.now(),
-            });
-        } catch (error) {
-            state.generatedTogetherReplies[index].status = 'failed';
-            state.generatedTogetherReplies[index].error = String(error?.message || error);
-            failures.push({
-                message: messages[index],
-                error: state.generatedTogetherReplies[index].error,
-            });
-        }
+        state.messageHistory.push({
+            id: `local-${Date.now()}`,
+            sender: 'character',
+            senderName: characterName,
+            text: combinedMessage,
+            time: Date.now(),
+        });
         renderTogetherMessageHistory();
         renderTogetherReplyLog();
-    }
-    if (failures.length) {
         setMessage(
-            `${characterName} 已发送 ${sentMessages.length}/${messages.length} 条，${failures.length} 条发送失败。`,
+            `${characterName} 已将 ${messages.length} 段回复合并为一条私信发送。`,
+            'success',
+        );
+        setConnectionState(`${characterName} 已合并发送 ${messages.length} 段`, 'success');
+    } catch (error) {
+        for (const reply of state.generatedTogetherReplies) {
+            reply.status = 'failed';
+            reply.error = String(error?.message || error);
+        }
+        renderTogetherReplyLog();
+        setMessage(
+            `${characterName} 的合并私信发送失败：${error?.message || error}`,
             'error',
         );
-        setConnectionState(
-            `${characterName} 部分消息发送失败`,
-            'warning',
-        );
-    } else {
-        setMessage(`${characterName} 已分批连续回复 ${sentMessages.length} 条私信。`, 'success');
-        setConnectionState(`${characterName} 已分批回复 ${sentMessages.length} 条`, 'success');
+        setConnectionState(`${characterName} 私信发送失败`, 'warning');
     }
-    return { messages: sentMessages, failures };
+    return { messages, combinedMessage };
 }
 
 function renderRoomPlaylist(data) {
@@ -3333,7 +3317,7 @@ function panelHtml() {
                         <span id="nmcnativeTogetherMessageState" class="nmcnative-list-summary">正在读取网易云私信...</span>
                         <button id="nmcnativeRefreshTogetherMessages" type="button">刷新聊天记录</button>
                     </div>
-                    <p id="nmcnativeTogetherReplyContext" class="nmcnative-note" data-nmcnative-char-template="读取你在网易云平台的私信记录，{char} 会结合聊天内容、当前歌曲和绑定人设连续回复 1–3 条消息。">读取你在网易云平台的私信记录，角色会结合聊天内容、当前歌曲和绑定人设连续回复 1–3 条消息。</p>
+                    <p id="nmcnativeTogetherReplyContext" class="nmcnative-note" data-nmcnative-char-template="读取你在网易云平台的私信记录，{char} 会结合聊天内容、当前歌曲和绑定人设生成 1–3 段回复，并合并为一条多段私信发送。">读取你在网易云平台的私信记录，角色会结合聊天内容、当前歌曲和绑定人设生成 1–3 段回复，并合并为一条多段私信发送。</p>
                     <div id="nmcnativeTogetherMessageContacts" class="nmcnative-contact-list" role="listbox" aria-label="网易云私信联系人">
                         <p class="nmcnative-list-empty">正在读取联系人...</p>
                     </div>
@@ -3342,7 +3326,7 @@ function panelHtml() {
                     </div>
                     <button id="nmcnativeGenerateTogetherReply" class="nmcnative-primary nmcnative-wide-button" type="button" data-nmcnative-char-template="让 {char} 回应并发送">让角色回应并发送</button>
                     <div id="nmcnativeTogetherMessageLog" class="nmcnative-message-log" aria-live="polite"></div>
-                    <p class="nmcnative-note">回复会作为连续私信发送给当前选中的联系人，不需要你手动输入。</p>
+                    <p class="nmcnative-note">网易云连续私信接口存在发送频率限制，因此多段内容会写入同一条消息，并保留空行分段。</p>
                 </details>
             </section>
 

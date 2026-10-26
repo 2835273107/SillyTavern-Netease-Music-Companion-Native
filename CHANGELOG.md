@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.7.4
+
+- Replaced unreliable back-to-back multi-message delivery with one NetEase
+  private message containing all generated paragraphs separated by blank lines.
+- Preserved line breaks in outgoing private messages instead of stripping them
+  during backend sanitization.
+- Kept generated paragraph statuses in the plugin while making the NetEase
+  conversation and platform result a single delivered message.
+
 ## 1.7.3
 
 - Queued multi-message character replies and added a 2.2-second delivery
