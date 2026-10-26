@@ -15,9 +15,9 @@ test('keeps manifest, package and config on the native namespace', () => {
     const backend = read('plugin/index.js');
     const service = read('plugin/together-native/service.py');
 
-    assert.equal(manifest.version, '1.8.2');
+    assert.equal(manifest.version, '1.9.0');
     assert.equal(manifest.homePage.endsWith('SillyTavern-Netease-Music-Companion-Native'), true);
-    assert.equal(packageJson.version, '1.8.2');
+    assert.equal(packageJson.version, '1.9.0');
     assert.match(frontend, /nmcnativePlayerLyrics/);
     assert.match(backend, /\/song-audio\/:songId/);
     assert.match(backend, /\/together\/send-message/);
@@ -41,6 +41,10 @@ test('keeps manifest, package and config on the native namespace', () => {
     assert.match(frontend, /同时包含第一人称“我”和对 \{\{user\}\} 说的“你”/);
     assert.match(frontend, /nmcnativeResendTogetherReply/);
     assert.match(frontend, /resendGeneratedTogetherMessage/);
+    assert.match(frontend, /getSongLyricsText/);
+    assert.match(frontend, /songContextForGeneration/);
+    assert.match(frontend, /\/lyric\?song_id=/);
+    assert.match(frontend, /结合歌词中的具体意象/);
     assert.doesNotMatch(frontend, /\.scrollIntoView\(/);
     assert.match(frontend, /data-nmcnative-tab/);
     assert.match(frontend, /ToolManager\.registerFunctionTool/);

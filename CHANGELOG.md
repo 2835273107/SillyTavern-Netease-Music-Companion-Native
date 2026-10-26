@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.9.0
+
+- Added a shared lyric extractor that reuses loaded LRC data or fetches lyrics
+  and translations from NetEase by song ID.
+- Included lyrics in song comments, Listen Together replies, standalone song
+  messages, recommendation reasons, automatic next-song selection and music
+  state tool responses.
+- Required song evaluations to use lyric imagery or wording instead of relying
+  only on the title and artist.
+
 ## 1.8.2
 
 - Added a manual “resend last generated content” button for generated private

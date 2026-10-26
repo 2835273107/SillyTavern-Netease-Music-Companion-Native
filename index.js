@@ -41,6 +41,7 @@ const state = {
     playerQueueIndex: -1,
     playerAutoAdvancing: false,
     lyricLines: [],
+    lyricCache: new Map(),
     lyricIndex: -1,
     roomPlaylist: [],
     roomPlaylistCurrentId: '',
@@ -772,6 +773,60 @@ function parseLrc(lyricText, translatedText = '') {
     return lines;
 }
 
+function lyricLinesAsText(lines) {
+    return (Array.isArray(lines) ? lines : [])
+        .map(line => {
+            const text = String(line.text || '').trim();
+            const translation = String(line.translation || '').trim();
+            return translation ? `${text}\n${translation}` : text;
+        })
+        .filter(Boolean)
+        .join('\n');
+}
+
+async function getSongLyricsText(song, { maxChars = 0 } = {}) {
+    const songId = String(song?.id || song?.songId || '').trim();
+    if (!/^\d{1,20}$/.test(songId)) {
+        return '';
+    }
+    let lyrics = state.lyricCache.get(songId) || '';
+    if (!lyrics) {
+        if (String(state.playerSong?.id || '') === songId && state.lyricLines.length) {
+            lyrics = lyricLinesAsText(state.lyricLines);
+        } else {
+            try {
+                const data = await api(`/lyric?song_id=${encodeURIComponent(songId)}`);
+                lyrics = lyricLinesAsText(parseLrc(data?.lyric, data?.translated));
+            } catch {
+                lyrics = '';
+            }
+        }
+        if (lyrics) {
+            state.lyricCache.set(songId, lyrics);
+        }
+    }
+    return Number(maxChars) > 0 ? lyrics.slice(0, maxChars) : lyrics;
+}
+
+async function songContextForGeneration(song, { maxLyricChars = 0 } = {}) {
+    const name = song?.name || song?.songName || song?.song_name || '未知歌曲';
+    const artist = song?.artist || '';
+    const album = song?.album || '';
+    const lyrics = await getSongLyricsText(song, { maxChars: maxLyricChars });
+    return {
+        name,
+        artist,
+        album,
+        lyrics,
+        text: [
+            `歌曲：《${name}》`,
+            artist ? `歌手：${artist}` : '',
+            album ? `专辑：${album}` : '',
+            lyrics ? `歌词：\n${lyrics}` : '歌词：网易云未返回可用歌词。请只根据已知歌曲信息表达，不要编造具体歌词。',
+        ].filter(Boolean).join('\n'),
+    };
+}
+
 function renderPlayerLyrics() {
     const container = element('nmcnativePlayerLyrics');
     if (!container) {
@@ -1132,17 +1187,21 @@ async function playNextPlayerSong({ automatic = false } = {}) {
             extension_settings[EXTENSION_KEY].characterAutoSelect
             && state.playerQueue.length > 1
         ) {
-            const candidates = state.playerQueue
+            const queueCandidates = state.playerQueue
                 .filter(item => String(item.id) !== currentId)
-                .slice(0, 40)
-                .map(item => ({
+                .slice(0, 8);
+            const [currentSongContext, candidates] = await Promise.all([
+                songContextForGeneration(state.playerSong, { maxLyricChars: 1000 }),
+                Promise.all(queueCandidates.map(async item => ({
                     songId: String(item.id),
                     name: item.name,
                     artist: item.artist || '',
-                }));
+                    lyrics: await getSongLyricsText(item, { maxChars: 600 }),
+                }))),
+            ]);
             try {
                 const reply = await quiet(
-                    `你是 {{char}}。当前播放的是《${state.playerSong?.name || ''}》。请根据你的人格、背景和最近对话，从以下候选歌曲中选择下一首：${JSON.stringify(candidates)}。输出严格 JSON：{"songId":"候选中的歌曲ID","reason":"一句话理由"}。只输出 JSON。`,
+                    `你是 {{char}}。${currentSongContext.text}\n请根据你的人格、背景、最近对话以及当前歌曲歌词，从以下候选歌曲及其歌词中选择下一首：${JSON.stringify(candidates)}。选择理由必须结合歌词，禁止只根据歌名选择或编造歌词。输出严格 JSON：{"songId":"候选中的歌曲ID","reason":"一句角色口吻短句"}。只输出 JSON。`,
                     { candidateGuard: false },
                 );
                 const parsed = parseJsonReply(reply);
@@ -1546,8 +1605,8 @@ async function generateTogetherReply() {
     }
     const currentSong = state.currentSong || state.playerSong;
     const songContext = currentSong
-        ? `当前一起听的歌曲是《${currentSong.songName || currentSong.name || '未知歌曲'}》${currentSong.artist ? ` - ${currentSong.artist}` : ''}。`
-        : '当前没有读取到正在播放的歌曲。';
+        ? (await songContextForGeneration(currentSong, { maxLyricChars: 6000 })).text
+        : '当前没有读取到正在播放的歌曲，也没有可用歌词。';
     const conversation = state.messageHistory
         .slice(-12)
         .map(message => {
@@ -1559,6 +1618,7 @@ async function generateTogetherReply() {
         `你正在阅读 {{char}} 在网易云音乐与“${contact.name}”（对应当前 {{user}}）的私信聊天记录。`,
         '聊天记录中由当前网易云账号发出的消息都代表 {{char}}，不是 {{user}}。',
         songContext,
+        currentSong ? '如果提供了歌词，回复必须结合歌词中的具体意象、句子或情绪，禁止只复述歌名。' : '',
         `聊天记录：\n${conversation}`,
         '请以 {{char}} 的身份，根据这段聊天接续回复 1 到 3 条连续的短句。每条都像真实私信，可分别表达情绪、回应和补充，不要重复，不要添加角色名前缀或动作说明。',
         `只输出严格 JSON：{"messages":["第一条","第二条"]}。每条不超过 ${TOGETHER_REPLY_CHAR_LIMIT} 个中文字符。`,
@@ -1616,7 +1676,7 @@ async function speakCurrentSongToUser() {
     if (!contact) {
         throw new Error('请先读取并选择一个网易云私信联系人');
     }
-    const songName = song.songName || song.name || '未知歌曲';
+    const songDetails = await songContextForGeneration(song, { maxLyricChars: 6000 });
     const recentConversation = state.messageHistory
         .slice(-8)
         .map(message => {
@@ -1625,7 +1685,9 @@ async function speakCurrentSongToUser() {
         })
         .join('\n');
     const reply = await quiet([
-        `你正在和 {{user}} 一起听《${songName}》${song.artist ? ` - ${song.artist}` : ''}。`,
+        `你正在和 {{user}} 一起听这首歌。`,
+        songDetails.text,
+        '必须结合歌词中的具体意象、句子或情绪写这条短句，禁止只重复歌名或歌手。',
         recentConversation ? `最近的网易云私信：\n${recentConversation}` : '',
         `请以 {{char}} 的身份，写一句想直接私信给 {{user}} 的听歌短句。只写一句，不超过 ${SPEAK_SONG_CHAR_LIMIT} 个中文字符，不要加引号、角色名前缀或解释。`,
     ].filter(Boolean).join('\n\n'), {
@@ -1868,8 +1930,9 @@ async function characterCommentOnSong() {
     if (!song) {
         throw new Error('缺少歌曲信息');
     }
+    const songDetails = await songContextForGeneration(song, { maxLyricChars: 6000 });
     const generated = await quiet(
-        `你是 {{char}}。你正在听《${song.name || song.songName || ''}》${song.artist ? ` - ${song.artist}` : ''}。请完全以角色本人的人格、经历和说话方式，写一段发布在网易云歌曲评论区的短评论，不超过 ${SONG_COMMENT_CHAR_LIMIT} 个中文字符，不要自称 AI，不要解释，不要加引号，只输出评论正文。`,
+        `你是 {{char}}。${songDetails.text}\n请完全以角色本人的人格、经历和说话方式，结合歌词中的具体意象、句子或情绪，写一段发布在网易云歌曲评论区的短评论，不超过 ${SONG_COMMENT_CHAR_LIMIT} 个中文字符。禁止只复述歌名，不要自称 AI，不要解释，不要加引号，只输出评论正文。`,
         { candidateGuard: false, responseLength: 220 },
     );
     const content = await postSongComment(songId, generated);
@@ -1923,11 +1986,14 @@ async function toolCommentSong(args = {}) {
     if (!song?.id) {
         throw new Error('当前没有可用于评论的歌曲');
     }
-    const content = String(args.content || '').trim()
-        || await quiet(
-            `你是 {{char}}。请以角色本人的口吻，为《${song.name || song.songName || ''}》${song.artist ? ` - ${song.artist}` : ''}写一段网易云歌曲短评论，不超过 ${SONG_COMMENT_CHAR_LIMIT} 个中文字符。不要自称 AI，不要解释，只输出评论正文。`,
+    let content = String(args.content || '').trim();
+    if (!content) {
+        const songDetails = await songContextForGeneration(song, { maxLyricChars: 6000 });
+        content = await quiet(
+            `你是 {{char}}。${songDetails.text}\n请以角色本人的口吻，结合歌词中的具体意象、句子或情绪，写一段网易云歌曲短评论，不超过 ${SONG_COMMENT_CHAR_LIMIT} 个中文字符。禁止只复述歌名，不要自称 AI，不要解释，只输出评论正文。`,
             { candidateGuard: false, responseLength: 220 },
         );
+    }
     const posted = await postSongComment(song.id, content);
     setText('nmcnativeGeneratedComment', posted);
     return { ok: true, songId: String(song.id), content: posted };
@@ -1935,6 +2001,12 @@ async function toolCommentSong(args = {}) {
 
 async function toolGetMusicState() {
     const audio = element('nmcnativePlayerAudio');
+    const lyrics = state.playerSong
+        ? await getSongLyricsText(state.playerSong, { maxChars: 2000 })
+        : '';
+    const currentLyricLine = state.lyricIndex >= 0
+        ? state.lyricLines[state.lyricIndex]?.text || ''
+        : '';
     return {
         player: state.playerSong
             ? {
@@ -1943,6 +2015,8 @@ async function toolGetMusicState() {
                 artist: state.playerSong.artist,
                 playing: Boolean(audio && !audio.paused),
                 currentTime: Number(audio?.currentTime) || 0,
+                currentLyric: currentLyricLine,
+                lyrics,
                 queueLength: state.playerQueue.length,
             }
             : null,
@@ -2331,16 +2405,20 @@ async function chooseSongs(candidates) {
     if (!Array.isArray(candidates) || candidates.length === 0) {
         return [];
     }
-    const compact = candidates.map(song => ({
-        id: String(song.id),
-        name: song.name,
-        artist: song.artist,
-        lyric_snippet: song.lyric_snippet || '',
+    const compact = await Promise.all(candidates.map(async song => {
+        const lyrics = await getSongLyricsText(song, { maxChars: 700 });
+        return {
+            id: String(song.id),
+            name: song.name,
+            artist: song.artist,
+            lyrics: lyrics || song.lyric_snippet || '',
+        };
     }));
-    const reply = await quiet(`你是 {{char}}。请从以下候选歌曲及歌词片段中挑选想推荐给 {{user}} 的歌曲：${JSON.stringify(compact)}。
+    const reply = await quiet(`你是 {{char}}。请从以下候选歌曲及其歌词中挑选想推荐给 {{user}} 的歌曲：${JSON.stringify(compact)}。
 reason 不是分析或第三人称评价，而是 {{char}} 当场直接对 {{user}} 说的一句推荐语，必须自然延续你的人格、关系、预设语气和最近对话。
 每条 reason 必须是一句完整短句，并且同时包含第一人称“我”和对 {{user}} 说的“你”。
 禁止出现“贴合、符合、体现、气质、人设、角色设定、这首适合”等分析词，禁止解释为什么适合角色，禁止使用第三人称称呼 {{char}}。
+推荐语必须结合该歌曲歌词中的具体意象、句子或情绪；歌词为空时才可以只根据歌名和歌手推荐，禁止编造歌词。
 每首推荐语不超过 40 个中文字符，不同歌曲之间不要重复。
 输出严格 JSON：{"selected":[{"id":"候选ID","reason":"我对 {{user}} 说的推荐短句"}]}。只输出 JSON。`);
     const parsed = parseJsonReply(reply);
@@ -3391,6 +3469,7 @@ function panelHtml() {
                         <button id="nmcnativeLoadSongComments" type="button">读取评论</button>
                         <button id="nmcnativeCharacterSongComment" type="button" data-nmcnative-char-template="以 {char} 身份评论">以角色身份评论</button>
                     </div>
+                    <p class="nmcnative-note">生成评论时会读取当前歌曲的完整歌词与翻译，不会只根据歌名评价。</p>
                     <p id="nmcnativeGeneratedComment" class="nmcnative-status-line"></p>
                     <div id="nmcnativeSongComments" class="nmcnative-comments">
                         <p class="nmcnative-comment-empty">载入歌曲后可读取评论</p>
@@ -3477,7 +3556,7 @@ function panelHtml() {
                         <span id="nmcnativeTogetherMessageState" class="nmcnative-list-summary">正在读取网易云私信...</span>
                         <button id="nmcnativeRefreshTogetherMessages" type="button">刷新聊天记录</button>
                     </div>
-                    <p id="nmcnativeTogetherReplyContext" class="nmcnative-note" data-nmcnative-char-template="读取你在网易云平台的私信记录，{char} 会结合聊天内容、当前歌曲和绑定人设生成 1–3 段回复，并合并为一条多段私信发送。">读取你在网易云平台的私信记录，角色会结合聊天内容、当前歌曲和绑定人设生成 1–3 段回复，并合并为一条多段私信发送。</p>
+                    <p id="nmcnativeTogetherReplyContext" class="nmcnative-note" data-nmcnative-char-template="读取你在网易云平台的私信记录，{char} 会结合聊天内容、当前歌曲歌词、绑定人设和预设生成 1–3 段回复，并合并为一条多段私信发送。">读取你在网易云平台的私信记录，角色会结合聊天内容、当前歌曲歌词、绑定人设和预设生成 1–3 段回复，并合并为一条多段私信发送。</p>
                     <div id="nmcnativeTogetherMessageContacts" class="nmcnative-contact-list" role="listbox" aria-label="网易云私信联系人">
                         <p class="nmcnative-list-empty">正在读取联系人...</p>
                     </div>
