@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.8.1
+
+- Changed song recommendation reasons to direct `{{char}}`-to-`{{user}}`
+  short lines instead of third-person persona analysis.
+- Required every generated recommendation to contain both “我” and “你” and
+  limited it to 40 Chinese characters.
+- Added a deterministic fallback that rewrites analytical or non-direct model
+  output into a character-voice recommendation.
+
 ## 1.8.0
 
 - Sent the “let the character talk about this song” result directly to the

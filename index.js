@@ -2237,6 +2237,26 @@ async function searchCandidates(keywords) {
     });
 }
 
+function normalizeCharacterRecommendation(value, song) {
+    const reason = String(value || '')
+        .replace(/^[“”"'「」]+|[“”"'「」]+$/g, '')
+        .trim();
+    const analytical = /贴合|符合|体现|气质|人设|角色设定|这首适合/.test(reason);
+    if (!reason || analytical) {
+        return `我想和你一起听《${song.name}》，好吗？`.slice(0, 40);
+    }
+    if (!reason.includes('我') && !reason.includes('你')) {
+        return `我想和你一起听《${song.name}》，好吗？`.slice(0, 40);
+    }
+    if (!reason.includes('我')) {
+        return `我想和你一起听《${song.name}》，好吗？`.slice(0, 40);
+    }
+    if (!reason.includes('你')) {
+        return `你听听这首，${reason}`.slice(0, 40);
+    }
+    return reason.slice(0, 40);
+}
+
 async function chooseSongs(candidates) {
     if (!Array.isArray(candidates) || candidates.length === 0) {
         return [];
@@ -2247,15 +2267,24 @@ async function chooseSongs(candidates) {
         artist: song.artist,
         lyric_snippet: song.lyric_snippet || '',
     }));
-    const reply = await quiet(`你是 {{char}}。以下是候选歌曲及歌词片段：${JSON.stringify(compact)}。请挑选最符合角色设定的歌曲，输出严格 JSON：{"selected":[{"id":"...","reason":"一句话理由"}]}。只输出 JSON。`);
+    const reply = await quiet(`你是 {{char}}。请从以下候选歌曲及歌词片段中挑选想推荐给 {{user}} 的歌曲：${JSON.stringify(compact)}。
+reason 不是分析或第三人称评价，而是 {{char}} 当场直接对 {{user}} 说的一句推荐语，必须自然延续你的人格、关系、预设语气和最近对话。
+每条 reason 必须是一句完整短句，并且同时包含第一人称“我”和对 {{user}} 说的“你”。
+禁止出现“贴合、符合、体现、气质、人设、角色设定、这首适合”等分析词，禁止解释为什么适合角色，禁止使用第三人称称呼 {{char}}。
+每首推荐语不超过 40 个中文字符，不同歌曲之间不要重复。
+输出严格 JSON：{"selected":[{"id":"候选ID","reason":"我对 {{user}} 说的推荐短句"}]}。只输出 JSON。`);
     const parsed = parseJsonReply(reply);
     const candidateIds = new Set(compact.map(song => song.id));
     const used = new Set();
     return (Array.isArray(parsed.selected) ? parsed.selected : [])
-        .map(item => ({
-            id: String(item?.id || '').trim(),
-            reason: String(item?.reason || '').trim().slice(0, 160),
-        }))
+        .map(item => {
+            const id = String(item?.id || '').trim();
+            const song = compact.find(candidate => candidate.id === id);
+            return {
+                id,
+                reason: song ? normalizeCharacterRecommendation(item?.reason, song) : '',
+            };
+        })
         .filter(item => item.id && candidateIds.has(item.id) && !used.has(item.id) && used.add(item.id))
         .slice(0, compact.length);
 }
