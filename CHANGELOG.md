@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.7.2
+
+- Replaced user-facing generic "character" labels throughout the extension
+  copy with the live `{{char}}` name.
+- Changed NetEase private-chat alignment so `{{char}}` appears on the left and
+  `{{user}}` appears on the right.
+- Refresh character-aware copy, bubbles, contact previews and reply logs after
+  character card, chat or group changes.
+
 ## 1.7.1
 
 - Mapped private messages sent by the active NetEase account to the current

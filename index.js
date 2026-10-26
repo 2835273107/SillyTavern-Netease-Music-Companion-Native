@@ -1237,6 +1237,26 @@ function activeCharacterName() {
         : '角色';
 }
 
+function activeUserName() {
+    const context = getContext();
+    const macroName = String(substituteParams('{{user}}') || '').trim();
+    if (macroName && macroName !== '{{user}}' && macroName !== 'User') {
+        return macroName;
+    }
+    return String(context.name1 || 'user').trim() || 'user';
+}
+
+function applyCharacterNameCopy(root = element('netease-music-companion-native')) {
+    if (!root) {
+        return;
+    }
+    const characterName = activeCharacterName();
+    root.querySelectorAll('[data-nmcnative-char-template]').forEach(node => {
+        node.textContent = String(node.dataset.nmcnativeCharTemplate || '')
+            .replaceAll('{char}', characterName);
+    });
+}
+
 function renderTogetherReplyLog() {
     const log = element('nmcnativeTogetherMessageLog');
     if (!log) {
@@ -1258,9 +1278,13 @@ function bindCharacterNameEvents() {
     }
     const context = getContext();
     const refreshLabels = () => {
+            applyCharacterNameCopy();
         renderMessageContacts();
         renderTogetherMessageHistory();
         renderTogetherReplyLog();
+        if (extension_settings[EXTENSION_KEY]?.conversationTools) {
+            syncConversationTools();
+        }
     };
     const eventNames = [
         context.eventTypes?.CHAT_CHANGED,
@@ -1382,8 +1406,8 @@ function renderTogetherMessageHistory() {
         updateMessageReplyAvailability();
         return;
     }
-    const contactName = selectedMessageContact()?.name || '对方';
     const characterName = activeCharacterName();
+    const userName = activeUserName();
     for (const message of state.messageHistory) {
         const bubble = document.createElement('div');
         const side = message.sender === 'contact' ? 'contact' : message.sender === 'character' ? 'character' : 'user';
@@ -1391,7 +1415,7 @@ function renderTogetherMessageHistory() {
         const meta = document.createElement('span');
         meta.className = 'nmcnative-chat-meta';
         meta.textContent = [
-            message.sender === 'user' || message.sender === 'character' ? characterName : contactName,
+            message.sender === 'user' || message.sender === 'character' ? characterName : userName,
             formatPrivateMessageTime(message.time),
         ].filter(Boolean).join(' · ');
         const text = document.createElement('span');
@@ -1483,12 +1507,12 @@ async function generateTogetherReply() {
     const conversation = state.messageHistory
         .slice(-12)
         .map(message => {
-            const speaker = message.sender === 'contact' ? contact.name : '{{char}}';
+            const speaker = message.sender === 'contact' ? '{{user}}' : '{{char}}';
             return `${speaker}：${String(message.text || '').replace(/\s+/g, ' ').slice(0, 260)}`;
         })
         .join('\n');
     const prompt = [
-        `你正在阅读 {{char}} 在网易云音乐与“${contact.name}”的私信聊天记录。`,
+        `你正在阅读 {{char}} 在网易云音乐与“${contact.name}”（对应当前 {{user}}）的私信聊天记录。`,
         '聊天记录中由当前网易云账号发出的消息都代表 {{char}}，不是 {{user}}。',
         songContext,
         `聊天记录：\n${conversation}`,
@@ -1498,7 +1522,7 @@ async function generateTogetherReply() {
     const reply = await quiet(prompt, { candidateGuard: false });
     const messages = parseCharacterMessages(reply);
     if (!messages.length) {
-        throw new Error('角色没有生成可发送的回复');
+        throw new Error(`${activeCharacterName()} 没有生成可发送的回复`);
     }
 
     const characterName = activeCharacterName();
@@ -1518,8 +1542,8 @@ async function generateTogetherReply() {
     renderTogetherMessageHistory();
     state.generatedTogetherReplies = [...messages];
     renderTogetherReplyLog();
-    setMessage(`角色已连续回复 ${messages.length} 条私信。`, 'success');
-    setConnectionState(`角色已回复 ${messages.length} 条`, 'success');
+    setMessage(`${characterName} 已连续回复 ${messages.length} 条私信。`, 'success');
+    setConnectionState(`${characterName} 已回复 ${messages.length} 条`, 'success');
     return { messages };
 }
 
@@ -1682,7 +1706,7 @@ async function characterCommentOnSong() {
     );
     const content = await postSongComment(songId, generated);
     setText('nmcnativeGeneratedComment', content);
-    setMessage(`角色评论已发布：${content}`, 'success');
+    setMessage(`${activeCharacterName()} 评论已发布：${content}`, 'success');
     return content;
 }
 
@@ -1784,7 +1808,7 @@ function syncConversationTools() {
     ToolManager.registerFunctionTool({
         name: 'netease_companion_search',
         displayName: '搜索网易云歌曲',
-        description: '搜索网易云歌曲并返回歌曲 ID、名称、歌手和歌词片段。需要主动为角色选歌时可先搜索。',
+        description: `搜索网易云歌曲并返回歌曲 ID、名称、歌手和歌词片段。需要主动为 ${activeCharacterName()} 选歌时可先搜索。`,
         parameters: {
             type: 'object',
             properties: {
@@ -1871,8 +1895,8 @@ function syncConversationTools() {
     });
     ToolManager.registerFunctionTool({
         name: 'netease_companion_comment',
-        displayName: '以角色身份评论歌曲',
-        description: '以当前角色人设发布网易云歌曲评论。可由角色生成内容或使用给定内容。',
+        displayName: `以 ${activeCharacterName()} 身份评论歌曲`,
+        description: `以 ${activeCharacterName()} 的人设发布网易云歌曲评论。可由该角色生成内容或使用给定内容。`,
         parameters: {
             type: 'object',
             properties: {
@@ -1979,7 +2003,7 @@ function parseJsonReply(text) {
         if (start >= 0 && end > start) {
             return JSON.parse(withoutFence.slice(start, end + 1));
         }
-        throw new Error('角色返回的内容不是有效 JSON');
+        throw new Error(`${activeCharacterName()} 返回的内容不是有效 JSON`);
     }
 }
 
@@ -2109,7 +2133,7 @@ async function generatePersonaPlan({ withName = true } = {}) {
         .filter(Boolean)
         .slice(0, 3);
     if (keywords.length === 0) {
-        throw new Error('角色没有生成可用的搜索关键词');
+        throw new Error(`${activeCharacterName()} 没有生成可用的搜索关键词`);
     }
     return {
         playlistName: withName ? String(parsed.playlistName || '').trim() : '',
@@ -2203,18 +2227,18 @@ async function buildSelection() {
 async function runCreateFlow() {
     const plan = await generatePersonaPlan({ withName: true });
     if (!plan.playlistName) {
-        plan.playlistName = `${getContext().name2 || '角色'}的歌单`;
+        plan.playlistName = `${activeCharacterName()}的歌单`;
     }
     setConnectionState('正在搜索候选歌曲...', 'loading');
     const candidates = await searchCandidates(plan.keywords);
     if (candidates.length === 0) {
-        setMessage('未找到符合角色设定的歌曲，未创建歌单。', 'info');
+        setMessage(`没有找到符合 ${activeCharacterName()} 设定的歌曲，未创建歌单。`, 'info');
         return;
     }
     setConnectionState('正在筛选候选歌曲...', 'loading');
     const selected = await chooseSongs(candidates);
     if (selected.length === 0) {
-        setMessage('未找到符合角色设定的歌曲，未创建歌单。', 'info');
+        setMessage(`没有找到符合 ${activeCharacterName()} 设定的歌曲，未创建歌单。`, 'info');
         return;
     }
 
@@ -2249,7 +2273,7 @@ async function runAddToCurrentFlow() {
     }
     const { selected } = await buildSelection();
     if (selected.length === 0) {
-        setMessage('未找到符合角色设定的歌曲，未添加。', 'info');
+        setMessage(`没有找到符合 ${activeCharacterName()} 设定的歌曲，未添加。`, 'info');
         return;
     }
     const added = await api('/add-tracks', {
@@ -2914,15 +2938,15 @@ function injectStyles() {
             background: color-mix(in srgb, var(--SmartThemeBlurTintColor) 84%, transparent);
         }
         #netease-music-companion-native .nmcnative-chat-bubble.nmcnative-chat-user {
-            align-self: flex-end;
+            align-self: flex-start;
             border-color: color-mix(in srgb, var(--SmartThemeQuoteColor) 30%, var(--SmartThemeBorderColor));
             background: color-mix(in srgb, var(--SmartThemeQuoteColor) 13%, var(--SmartThemeBlurTintColor));
         }
         #netease-music-companion-native .nmcnative-chat-bubble.nmcnative-chat-contact {
-            align-self: flex-start;
+            align-self: flex-end;
         }
         #netease-music-companion-native .nmcnative-chat-bubble.nmcnative-chat-character {
-            align-self: flex-end;
+            align-self: flex-start;
             border-style: dashed;
             border-color: color-mix(in srgb, var(--SmartThemeQuoteColor) 48%, var(--SmartThemeBorderColor));
         }
@@ -3050,7 +3074,7 @@ function panelHtml() {
                             <h3>网易云音乐</h3>
                             <span class="nmcnative-header-badge">NATIVE</span>
                         </div>
-                        <p class="nmcnative-kicker">播放器 · 一起听 · 角色歌单</p>
+                        <p class="nmcnative-kicker" data-nmcnative-char-template="播放器 · 一起听 · {char}歌单">播放器 · 一起听 · 角色歌单</p>
                     </div>
                     <div class="nmcnative-header-tail">
                         <span id="nmcnativeStatusDot" class="nmcnative-status-dot" aria-label="登录状态"></span>
@@ -3171,7 +3195,7 @@ function panelHtml() {
                     <summary>歌曲评论</summary>
                     <div class="nmcnative-actions">
                         <button id="nmcnativeLoadSongComments" type="button">读取评论</button>
-                        <button id="nmcnativeCharacterSongComment" type="button">以角色身份评论</button>
+                        <button id="nmcnativeCharacterSongComment" type="button" data-nmcnative-char-template="以 {char} 身份评论">以角色身份评论</button>
                     </div>
                     <p id="nmcnativeGeneratedComment" class="nmcnative-status-line"></p>
                     <div id="nmcnativeSongComments" class="nmcnative-comments">
@@ -3180,13 +3204,13 @@ function panelHtml() {
                 </details>
 
                 <details class="nmcnative-details">
-                    <summary>播放与角色设置</summary>
+                    <summary data-nmcnative-char-template="播放与 {char} 设置">播放与角色设置</summary>
                     <div class="nmcnative-toggle-grid">
                         <label class="nmcnative-toggle"><input id="nmcnativeContinuousPlayback" type="checkbox"> 连续播放</label>
-                        <label class="nmcnative-toggle"><input id="nmcnativeCharacterAutoSelect" type="checkbox"> 角色自动选下一首</label>
-                        <label class="nmcnative-toggle nmcnative-toggle-wide"><input id="nmcnativeConversationTools" type="checkbox"> 允许角色在对话中调用网易云工具</label>
+                        <label class="nmcnative-toggle"><input id="nmcnativeCharacterAutoSelect" type="checkbox"> <span data-nmcnative-char-template="{char} 自动选下一首">角色自动选下一首</span></label>
+                        <label class="nmcnative-toggle nmcnative-toggle-wide"><input id="nmcnativeConversationTools" type="checkbox"> <span data-nmcnative-char-template="允许 {char} 在对话中调用网易云工具">允许角色在对话中调用网易云工具</span></label>
                     </div>
-                    <p class="nmcnative-note">角色评论、选歌和对话工具会一并读取当前角色绑定的主世界书与附加世界书，内容限制在 6000 字以内。对话工具仍需在 SillyTavern 的 Function Calling 设置中启用。</p>
+                    <p class="nmcnative-note" data-nmcnative-char-template="{char} 评论、选歌和对话工具会一并读取当前角色绑定的主世界书与附加世界书，内容限制在 6000 字以内。对话工具仍需在 SillyTavern 的 Function Calling 设置中启用。">角色评论、选歌和对话工具会一并读取当前角色绑定的主世界书与附加世界书，内容限制在 6000 字以内。对话工具仍需在 SillyTavern 的 Function Calling 设置中启用。</p>
                 </details>
             </section>
 
@@ -3201,7 +3225,7 @@ function panelHtml() {
                 <div class="nmcnative-actions">
                     <button id="nmcnativeCreateRoom" class="nmcnative-primary" type="button">创建房间</button>
                     <button id="nmcnativeToggleSongPolling" type="button">刷新当前歌曲</button>
-                    <button id="nmcnativeSpeakSong" type="button">让角色说说这首歌</button>
+                    <button id="nmcnativeSpeakSong" type="button" data-nmcnative-char-template="让 {char} 说说这首歌">让角色说说这首歌</button>
                     <button id="nmcnativeLeaveRoom" type="button">离开房间</button>
                 </div>
                 <div class="nmcnative-row" style="margin-top:8px">
@@ -3254,19 +3278,19 @@ function panelHtml() {
                 </details>
 
                 <details id="nmcnativeTogetherReplyDetails" class="nmcnative-details">
-                    <summary>角色私信回复</summary>
+                    <summary data-nmcnative-char-template="{char} 私信回复">角色私信回复</summary>
                     <div class="nmcnative-chat-toolbar">
                         <span id="nmcnativeTogetherMessageState" class="nmcnative-list-summary">正在读取网易云私信...</span>
                         <button id="nmcnativeRefreshTogetherMessages" type="button">刷新聊天记录</button>
                     </div>
-                    <p id="nmcnativeTogetherReplyContext" class="nmcnative-note">读取你在网易云平台的私信记录，角色会结合聊天内容、当前歌曲和绑定人设连续回复 1–3 条消息。</p>
+                    <p id="nmcnativeTogetherReplyContext" class="nmcnative-note" data-nmcnative-char-template="读取你在网易云平台的私信记录，{char} 会结合聊天内容、当前歌曲和绑定人设连续回复 1–3 条消息。">读取你在网易云平台的私信记录，角色会结合聊天内容、当前歌曲和绑定人设连续回复 1–3 条消息。</p>
                     <div id="nmcnativeTogetherMessageContacts" class="nmcnative-contact-list" role="listbox" aria-label="网易云私信联系人">
                         <p class="nmcnative-list-empty">正在读取联系人...</p>
                     </div>
                     <div id="nmcnativeTogetherMessageHistory" class="nmcnative-chat-history" aria-live="polite">
                         <p class="nmcnative-list-empty">选择联系人后显示聊天记录</p>
                     </div>
-                    <button id="nmcnativeGenerateTogetherReply" class="nmcnative-primary nmcnative-wide-button" type="button">让角色回应并发送</button>
+                    <button id="nmcnativeGenerateTogetherReply" class="nmcnative-primary nmcnative-wide-button" type="button" data-nmcnative-char-template="让 {char} 回应并发送">让角色回应并发送</button>
                     <div id="nmcnativeTogetherMessageLog" class="nmcnative-message-log" aria-live="polite"></div>
                     <p class="nmcnative-note">回复会作为连续私信发送给当前选中的联系人，不需要你手动输入。</p>
                 </details>
@@ -3290,7 +3314,7 @@ function panelHtml() {
                     <button id="nmcnativeUsePlaylist" class="nmcnative-primary" type="button">使用选中歌单</button>
                 </div>
                 <p id="nmcnativeTargetPlaylistStatus" class="nmcnative-status-line">尚未选择目标歌单</p>
-                <p class="nmcnative-note">角色会先搜索候选歌曲，再根据角色设定选择。候选歌曲不会从当前歌单中读取。</p>
+                <p class="nmcnative-note" data-nmcnative-char-template="{char} 会先搜索候选歌曲，再根据角色设定选择。候选歌曲不会从当前歌单中读取。">角色会先搜索候选歌曲，再根据角色设定选择。候选歌曲不会从当前歌单中读取。</p>
                 <div class="nmcnative-actions">
                     <button id="nmcnativeCreateByPersona" class="nmcnative-primary" type="button">新建歌单</button>
                     <button id="nmcnativeAddToCurrent" type="button">添加歌曲到当前歌单</button>
@@ -3429,7 +3453,7 @@ function bindEvents() {
             if (!accountId) {
                 return;
             }
-            const label = window.prompt('账号标签，例如：角色小号')?.trim();
+            const label = window.prompt(`账号标签，例如：${activeCharacterName()}小号`)?.trim();
             if (!label) {
                 throw new Error('账号标签不能为空');
             }
@@ -3503,10 +3527,10 @@ function bindEvents() {
     });
 
     element('nmcnativeCreateByPersona').addEventListener('click', () => {
-        void withBusy('角色正在策划歌单...', () => runCreateFlow());
+        void withBusy(`${activeCharacterName()} 正在策划歌单...`, () => runCreateFlow());
     });
     element('nmcnativeAddToCurrent').addEventListener('click', () => {
-        void withBusy('角色正在为当前歌单选歌...', () => runAddToCurrentFlow());
+        void withBusy(`${activeCharacterName()} 正在为当前歌单选歌...`, () => runAddToCurrentFlow());
     });
 
     element('nmcnativeRefreshPlayerPlaylists').addEventListener('click', () => {
@@ -3554,7 +3578,7 @@ function bindEvents() {
         void withBusy('正在切换上一首...', playPreviousPlayerSong);
     });
     element('nmcnativePlayerNext').addEventListener('click', () => {
-        void withBusy('角色正在选择下一首...', () => playNextPlayerSong());
+        void withBusy(`${activeCharacterName()} 正在选择下一首...`, () => playNextPlayerSong());
     });
     element('nmcnativeContinuousPlayback').addEventListener('change', event => {
         extension_settings[EXTENSION_KEY].continuousPlayback = event.target.checked;
@@ -3588,7 +3612,7 @@ function bindEvents() {
         }
     });
     element('nmcnativeGenerateTogetherReply').addEventListener('click', () => {
-        void withBusy('角色正在回复...', generateTogetherReply);
+        void withBusy(`${activeCharacterName()} 正在回复...`, generateTogetherReply);
     });
     element('nmcnativeRefreshTogetherMessages').addEventListener('click', () => {
         void withBusy('正在刷新网易云聊天记录...', async () => {
@@ -3605,7 +3629,7 @@ function bindEvents() {
         void withBusy('正在读取评论...', loadSongComments);
     });
     element('nmcnativeCharacterSongComment').addEventListener('click', () => {
-        void withBusy('角色正在写评论...', characterCommentOnSong);
+        void withBusy(`${activeCharacterName()} 正在写评论...`, characterCommentOnSong);
     });
     element('nmcnativeRefreshRoomPlaylist').addEventListener('click', () => {
         void withBusy('正在读取一起听房间歌单...', refreshRoomPlaylist);
@@ -3737,7 +3761,7 @@ function bindEvents() {
         }
     });
     element('nmcnativeSpeakSong').addEventListener('click', () => {
-        void withBusy('角色正在听歌...', async () => {
+        void withBusy(`${activeCharacterName()} 正在听歌...`, async () => {
             if (!state.currentSong) {
                 await pollTogetherSongOnce();
             }
@@ -3791,6 +3815,7 @@ async function initializePanel() {
         return;
     }
     container.insertAdjacentHTML('beforeend', panelHtml());
+    applyCharacterNameCopy(element('netease-music-companion-native'));
     element('nmcnativeBackendUrl').value = extension_settings[EXTENSION_KEY].backendUrl;
     element('nmcnativeTogetherMode').value = extension_settings[EXTENSION_KEY].togetherCreationMode;
     element('nmcnativeContinuousPlayback').checked = extension_settings[EXTENSION_KEY].continuousPlayback;
