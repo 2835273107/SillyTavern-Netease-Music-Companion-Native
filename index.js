@@ -14,6 +14,7 @@ const DEFAULT_BACKEND = '/api/plugins/netease-music-native';
 const CANDIDATE_GUARD = '候选歌曲只能来自本次搜索接口返回的结果。禁止读取、引用或调用任何接口获取当前歌单中已有的歌曲作为候选。若搜索结果中没有符合角色设定的歌，返回空 selected 数组，不要从歌单中取歌补充。';
 const WORLDBOOK_CONTEXT_LIMIT = 6000;
 const WORLDBOOK_CACHE_MS = 15000;
+const TOGETHER_REPLY_SEND_DELAY_MS = 2200;
 
 const state = {
     accounts: [],
@@ -1234,7 +1235,7 @@ function activeCharacterName() {
     }
     return context.name2 && context.name2 !== 'SillyTavern System'
         ? String(context.name2).trim()
-        : '角色';
+        : 'char';
 }
 
 function activeUserName() {
@@ -1264,10 +1265,17 @@ function renderTogetherReplyLog() {
     }
     log.replaceChildren();
     const characterName = activeCharacterName();
-    for (const message of state.generatedTogetherReplies) {
+    for (const reply of state.generatedTogetherReplies) {
+        const text = typeof reply === 'string' ? reply : reply.text;
+        const status = typeof reply === 'string' ? 'sent' : reply.status;
         const row = document.createElement('p');
         row.className = 'nmcnative-sent-message';
-        row.textContent = `${characterName}：${message}`;
+        row.dataset.status = status;
+        row.textContent = [
+            `${characterName}：${text}`,
+            status === 'pending' ? '（等待发送）' : '',
+            status === 'failed' ? '（发送失败）' : '',
+        ].filter(Boolean).join(' ');
         log.append(row);
     }
 }
@@ -1526,25 +1534,61 @@ async function generateTogetherReply() {
     }
 
     const characterName = activeCharacterName();
-    for (const message of messages) {
-        await api('/together/send-message', {
-            method: 'POST',
-            body: { message, userId: String(contact.id) },
-        });
-        state.messageHistory.push({
-            id: `local-${Date.now()}-${state.messageHistory.length}`,
-            sender: 'character',
-            senderName: characterName,
-            text: message,
-            time: Date.now(),
-        });
-    }
-    renderTogetherMessageHistory();
-    state.generatedTogetherReplies = [...messages];
+    state.generatedTogetherReplies = messages.map(text => ({ text, status: 'pending' }));
     renderTogetherReplyLog();
-    setMessage(`${characterName} 已连续回复 ${messages.length} 条私信。`, 'success');
-    setConnectionState(`${characterName} 已回复 ${messages.length} 条`, 'success');
-    return { messages };
+    const sentMessages = [];
+    const failures = [];
+    for (let index = 0; index < messages.length; index += 1) {
+        if (index > 0) {
+            setConnectionState(
+                `${characterName} 正在等待网易云接收上一条消息...`,
+                'loading',
+            );
+            await new Promise(resolve => window.setTimeout(resolve, TOGETHER_REPLY_SEND_DELAY_MS));
+        }
+        setConnectionState(
+            `${characterName} 正在发送第 ${index + 1}/${messages.length} 条...`,
+            'loading',
+        );
+        try {
+            await api('/together/send-message', {
+                method: 'POST',
+                body: { message: messages[index], userId: String(contact.id) },
+            });
+            sentMessages.push(messages[index]);
+            state.generatedTogetherReplies[index].status = 'sent';
+            state.messageHistory.push({
+                id: `local-${Date.now()}-${index}`,
+                sender: 'character',
+                senderName: characterName,
+                text: messages[index],
+                time: Date.now(),
+            });
+        } catch (error) {
+            state.generatedTogetherReplies[index].status = 'failed';
+            state.generatedTogetherReplies[index].error = String(error?.message || error);
+            failures.push({
+                message: messages[index],
+                error: state.generatedTogetherReplies[index].error,
+            });
+        }
+        renderTogetherMessageHistory();
+        renderTogetherReplyLog();
+    }
+    if (failures.length) {
+        setMessage(
+            `${characterName} 已发送 ${sentMessages.length}/${messages.length} 条，${failures.length} 条发送失败。`,
+            'error',
+        );
+        setConnectionState(
+            `${characterName} 部分消息发送失败`,
+            'warning',
+        );
+    } else {
+        setMessage(`${characterName} 已分批连续回复 ${sentMessages.length} 条私信。`, 'success');
+        setConnectionState(`${characterName} 已分批回复 ${sentMessages.length} 条`, 'success');
+    }
+    return { messages: sentMessages, failures };
 }
 
 function renderRoomPlaylist(data) {
@@ -2975,6 +3019,12 @@ function injectStyles() {
             margin: 3px 0;
             font-size: .8rem;
             overflow-wrap: anywhere;
+        }
+        #netease-music-companion-native .nmcnative-sent-message[data-status="pending"] {
+            opacity: .62;
+        }
+        #netease-music-companion-native .nmcnative-sent-message[data-status="failed"] {
+            color: #e48b8b;
         }
         #netease-music-companion-native .nmcnative-comments {
             max-height: 240px;

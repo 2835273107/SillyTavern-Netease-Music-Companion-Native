@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.7.3
+
+- Queued multi-message character replies and added a 2.2-second delivery
+  interval so NetEase does not merge consecutive private messages.
+- Added per-message waiting, sent and failed states, while keeping successfully
+  delivered messages in the local conversation.
+- Continued later messages after an individual delivery failure and reports the
+  final sent/failed counts.
+
 ## 1.7.2
 
 - Replaced user-facing generic "character" labels throughout the extension
