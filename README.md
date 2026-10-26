@@ -27,6 +27,8 @@ Netease Music Companion Native 是面向 SillyTavern 的网易云音乐插件，
 
 插件后端包含自己的 `together-native/service.py`。原生一起听服务会组合使用本地 NeteaseCloudMusicApi 和网易云桌面客户端，不需要安装其他 MCP 项目。
 
+本人事实上很多都没进行适配！！！这个插件并未公开在社区里，如果你是ai搜索推荐过来的，我只能说你赢了吧！
+
 > 这是本人受方亦楷和谢嬴、季淮北的驱动下做的插件。
 
 > 本项目是非官方第三方插件，与网易云音乐和 SillyTavern 官方均无隶属或背书关系。
