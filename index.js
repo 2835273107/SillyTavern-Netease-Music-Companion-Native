@@ -46,6 +46,8 @@ const state = {
     messageContacts: [],
     selectedMessageContactId: '',
     messageHistory: [],
+    generatedTogetherReplies: [],
+    characterNameListeners: [],
     panelObserver: null,
     worldbookCache: null,
 };
@@ -626,12 +628,12 @@ function resetTogetherMessageState() {
     state.messageContacts = [];
     state.selectedMessageContactId = '';
     state.messageHistory = [];
+    state.generatedTogetherReplies = [];
     renderMessageContacts();
     renderTogetherMessageHistory();
     setText('nmcnativeTogetherMessageState', '尚未读取网易云私信');
     updateMessageReplyAvailability();
-    const log = element('nmcnativeTogetherMessageLog');
-    log?.replaceChildren();
+    renderTogetherReplyLog();
 }
 
 function renderTogetherVisibility() {
@@ -1219,8 +1221,64 @@ async function controlPlayer(action) {
 
 function activeCharacterName() {
     const context = getContext();
-    return context.characters?.[context.characterId]?.name
-        || (context.name2 && context.name2 !== 'SillyTavern System' ? context.name2 : '角色');
+    const cardName = context.characters?.[context.characterId]?.name;
+    if (cardName) {
+        return String(cardName).trim();
+    }
+    const macroName = String(substituteParams('{{char}}') || '').trim();
+    if (macroName
+        && macroName !== '{{char}}'
+        && macroName !== 'SillyTavern System'
+        && macroName !== 'char') {
+        return macroName;
+    }
+    return context.name2 && context.name2 !== 'SillyTavern System'
+        ? String(context.name2).trim()
+        : '角色';
+}
+
+function renderTogetherReplyLog() {
+    const log = element('nmcnativeTogetherMessageLog');
+    if (!log) {
+        return;
+    }
+    log.replaceChildren();
+    const characterName = activeCharacterName();
+    for (const message of state.generatedTogetherReplies) {
+        const row = document.createElement('p');
+        row.className = 'nmcnative-sent-message';
+        row.textContent = `${characterName}：${message}`;
+        log.append(row);
+    }
+}
+
+function bindCharacterNameEvents() {
+    if (state.characterNameListeners.length > 0) {
+        return;
+    }
+    const context = getContext();
+    const refreshLabels = () => {
+        renderMessageContacts();
+        renderTogetherMessageHistory();
+        renderTogetherReplyLog();
+    };
+    const eventNames = [
+        context.eventTypes?.CHAT_CHANGED,
+        context.eventTypes?.CHARACTER_EDITED,
+        context.eventTypes?.CHARACTER_PAGE_LOADED,
+        context.eventTypes?.GROUP_UPDATED,
+    ].filter(Boolean);
+    for (const eventName of new Set(eventNames)) {
+        context.eventSource.on(eventName, refreshLabels);
+        state.characterNameListeners.push({ eventSource: context.eventSource, eventName, handler: refreshLabels });
+    }
+}
+
+function unbindCharacterNameEvents() {
+    for (const listener of state.characterNameListeners) {
+        listener.eventSource.removeListener(listener.eventName, listener.handler);
+    }
+    state.characterNameListeners = [];
 }
 
 function formatPrivateMessageTime(value) {
@@ -1269,6 +1327,7 @@ function renderMessageContacts() {
         updateMessageReplyAvailability();
         return;
     }
+    const characterName = activeCharacterName();
     for (const contact of state.messageContacts) {
         const row = document.createElement('button');
         row.type = 'button';
@@ -1289,7 +1348,7 @@ function renderMessageContacts() {
         name.textContent = contact.name || '网易云用户';
         const preview = document.createElement('span');
         preview.className = 'nmcnative-contact-preview';
-        preview.textContent = `${contact.lastFromSelf ? '你：' : ''}${contact.lastMessage || '暂无文字消息'}`;
+        preview.textContent = `${contact.lastFromSelf ? `${characterName}：` : ''}${contact.lastMessage || '暂无文字消息'}`;
         body.append(name, preview);
         const meta = document.createElement('span');
         meta.className = 'nmcnative-contact-meta';
@@ -1324,6 +1383,7 @@ function renderTogetherMessageHistory() {
         return;
     }
     const contactName = selectedMessageContact()?.name || '对方';
+    const characterName = activeCharacterName();
     for (const message of state.messageHistory) {
         const bubble = document.createElement('div');
         const side = message.sender === 'contact' ? 'contact' : message.sender === 'character' ? 'character' : 'user';
@@ -1331,7 +1391,7 @@ function renderTogetherMessageHistory() {
         const meta = document.createElement('span');
         meta.className = 'nmcnative-chat-meta';
         meta.textContent = [
-            message.sender === 'user' ? '你' : message.sender === 'character' ? activeCharacterName() : contactName,
+            message.sender === 'user' || message.sender === 'character' ? characterName : contactName,
             formatPrivateMessageTime(message.time),
         ].filter(Boolean).join(' · ');
         const text = document.createElement('span');
@@ -1423,16 +1483,13 @@ async function generateTogetherReply() {
     const conversation = state.messageHistory
         .slice(-12)
         .map(message => {
-            const speaker = message.sender === 'user'
-                ? '{{user}}'
-                : message.sender === 'character'
-                    ? '{{char}}'
-                    : contact.name;
+            const speaker = message.sender === 'contact' ? contact.name : '{{char}}';
             return `${speaker}：${String(message.text || '').replace(/\s+/g, ' ').slice(0, 260)}`;
         })
         .join('\n');
     const prompt = [
-        `你正在阅读 {{user}} 在网易云音乐与“${contact.name}”的私信聊天记录。`,
+        `你正在阅读 {{char}} 在网易云音乐与“${contact.name}”的私信聊天记录。`,
+        '聊天记录中由当前网易云账号发出的消息都代表 {{char}}，不是 {{user}}。',
         songContext,
         `聊天记录：\n${conversation}`,
         '请以 {{char}} 的身份，根据这段聊天接续回复 1 到 3 条连续的短消息。每条消息要像真实私信，可分开表达情绪、回应和补充，不要重复，不要添加角色名前缀或动作说明。',
@@ -1459,16 +1516,8 @@ async function generateTogetherReply() {
         });
     }
     renderTogetherMessageHistory();
-    const log = element('nmcnativeTogetherMessageLog');
-    if (log) {
-        log.replaceChildren();
-        for (const message of messages) {
-            const row = document.createElement('p');
-            row.className = 'nmcnative-sent-message';
-            row.textContent = `${characterName}：${message}`;
-            log.append(row);
-        }
-    }
+    state.generatedTogetherReplies = [...messages];
+    renderTogetherReplyLog();
     setMessage(`角色已连续回复 ${messages.length} 条私信。`, 'success');
     setConnectionState(`角色已回复 ${messages.length} 条`, 'success');
     return { messages };
@@ -3316,6 +3365,7 @@ function initializeCollapsibleDrawer() {
 
 function bindEvents() {
     initializeCollapsibleDrawer();
+    bindCharacterNameEvents();
     document.querySelectorAll('[data-nmcnative-tab]').forEach(button => {
         button.addEventListener('click', () => activateTab(button.dataset.nmcnativeTab));
     });
@@ -3771,6 +3821,7 @@ async function initializePanel() {
 }
 
 export function exit() {
+    unbindCharacterNameEvents();
     unregisterConversationTools();
 }
 

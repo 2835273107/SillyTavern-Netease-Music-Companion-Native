@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.7.1
+
+- Mapped private messages sent by the active NetEase account to the current
+  SillyTavern character instead of a hard-coded user label.
+- Chat bubbles, contact previews, character-reply logs and generation prompts
+  now use the live `{{char}}` name.
+- Chat labels refresh automatically when switching character cards, chats or
+  groups.
+
 ## 1.7.0
 
 - Added NetEase private-message contact and conversation-history reading to
