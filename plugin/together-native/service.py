@@ -782,6 +782,202 @@ def current_song() -> dict[str, Any]:
         return _with_debugger(read)
 
 
+def _room_state_on_client(websocket: WebSocket) -> dict[str, Any]:
+    ids = _module_ids()
+    script = r"""
+(() => {
+  const require = window.__neteaseCompanionRequire;
+  const store = require(__CORE__).a.getStore();
+  const playlist = store["async:listenTogetherPlayList"] || {};
+  const status = store["async:listenTogetherPlayStatus"] || {};
+  const latest = status.lastestStatus || {};
+  const playing = store.playing || {};
+  return {
+    trackIds: (playlist.displayTrackIds || []).map(String),
+    randomTrackIds: (playlist.randomTrackIds || []).map(String),
+    currentSongId: String(
+      latest.targetSongId
+      || (playing.curPlaying || {}).resourceId
+      || ""
+    ),
+    commandType: String(latest.commandType || ""),
+    playStatus: latest.playStatus == null ? "" : String(latest.playStatus),
+    progress: Number(latest.progress || 0),
+    clientSeq: Number(latest.clientSeq || 0)
+  };
+})()
+""".replace("__CORE__", str(ids["core"]))
+    result = websocket.evaluate(script)
+    if not isinstance(result, dict):
+        raise ServiceError("Unexpected room state response")
+    return result
+
+
+def room_state() -> dict[str, Any]:
+    def read(websocket: WebSocket) -> dict[str, Any]:
+        if not websocket.evaluate(BOOTSTRAP):
+            raise ServiceError("Could not access the NetEase client runtime")
+        state = _client_state(websocket)
+        if state.get("status") not in {"waiting", "togetherOwner", "together"}:
+            raise ServiceError("No active Listen Together room")
+        return {"success": True, **_room_state_on_client(websocket)}
+
+    with CLIENT_LOCK:
+        return _with_debugger(read)
+
+
+def play_room_track(track_id: str) -> dict[str, Any]:
+    normalized = str(track_id or "").strip()
+    if not normalized.isdigit():
+        raise ServiceError("trackId must be numeric")
+
+    def play(websocket: WebSocket) -> dict[str, Any]:
+        if not websocket.evaluate(BOOTSTRAP):
+            raise ServiceError("Could not access the NetEase client runtime")
+        state = _room_state_on_client(websocket)
+        ids = state.get("trackIds") or []
+        if normalized not in ids:
+            raise ServiceError("The requested song is not in the room playlist")
+        expression = r"""
+(async trackId => {
+  const require = window.__neteaseCompanionRequire;
+  const dispatch = require(__CORE__).a.getDispatch();
+  const result = dispatch({
+    type: "async:listenTogetherPlayList/playByTrackId",
+    payload: { id: trackId, commandType: "GOTO", playStatus: 1 }
+  });
+  if (result && typeof result.then === "function") await result;
+  await new Promise(resolve => setTimeout(resolve, 2500));
+  return true;
+})(__TRACK_ID__)
+""".replace("__CORE__", str(_module_ids()["core"])).replace(
+            "__TRACK_ID__",
+            json.dumps(normalized),
+        )
+        websocket.evaluate(expression, await_promise=True)
+        return {"success": True, **_room_state_on_client(websocket)}
+
+    with CLIENT_LOCK:
+        return _with_debugger(play)
+
+
+def add_room_track(track_id: str) -> dict[str, Any]:
+    normalized = str(track_id or "").strip()
+    if not normalized.isdigit():
+        raise ServiceError("trackId must be numeric")
+
+    def add(websocket: WebSocket) -> dict[str, Any]:
+        if not websocket.evaluate(BOOTSTRAP):
+            raise ServiceError("Could not access the NetEase client runtime")
+        state = _room_state_on_client(websocket)
+        ids = [str(value) for value in state.get("trackIds") or []]
+        next_ids = ids if normalized in ids else [*ids, normalized]
+        expression = r"""
+(async ({ trackIds, trackId }) => {
+  const require = window.__neteaseCompanionRequire;
+  const dispatch = require(__CORE__).a.getDispatch();
+  const result = dispatch({
+    type: "async:listenTogetherPlayList/playTracks",
+    payload: {
+      displayTrackIds: trackIds,
+      options: { playId: trackId, play: true, clear: true }
+    }
+  });
+  if (result && typeof result.then === "function") await result;
+  await new Promise(resolve => setTimeout(resolve, 2500));
+  return true;
+})(__PAYLOAD__)
+""".replace("__CORE__", str(_module_ids()["core"])).replace(
+            "__PAYLOAD__",
+            json.dumps(
+                {"trackIds": next_ids, "trackId": normalized},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+        )
+        websocket.evaluate(expression, await_promise=True)
+        current = _room_state_on_client(websocket)
+        if normalized not in (current.get("trackIds") or []):
+            raise ServiceError(
+                "The client did not add the song; it may be unavailable "
+                "for Listen Together"
+            )
+        return {"success": True, **current}
+
+    with CLIENT_LOCK:
+        return _with_debugger(add)
+
+
+def control_room(command: str) -> dict[str, Any]:
+    normalized = str(command or "").strip().lower()
+    if normalized not in {"play", "pause", "next", "previous"}:
+        raise ServiceError("Unsupported room control command")
+
+    def control(websocket: WebSocket) -> dict[str, Any]:
+        if not websocket.evaluate(BOOTSTRAP):
+            raise ServiceError("Could not access the NetEase client runtime")
+        state = _room_state_on_client(websocket)
+        ids = state.get("trackIds") or []
+        if not ids:
+            raise ServiceError("The room playlist is empty")
+        current_id = str(state.get("currentSongId") or ids[0])
+        current_index = ids.index(current_id) if current_id in ids else 0
+        target_id = current_id
+        if normalized == "next":
+            target_id = ids[(current_index + 1) % len(ids)]
+        elif normalized == "previous":
+            target_id = ids[(current_index - 1 + len(ids)) % len(ids)]
+        expression = r"""
+(async ({ command, currentId, targetId, progress }) => {
+  const require = window.__neteaseCompanionRequire;
+  const dispatch = require(__CORE__).a.getDispatch();
+  let result;
+  if (command === "play" || command === "pause") {
+    result = dispatch({
+      type: "async:listenTogetherPlayStatus/reportRequest",
+      payload: {
+        command: command === "play" ? "PLAY" : "PAUSE",
+        reason: "force",
+        ids: [currentId, currentId],
+        position: progress,
+        playStatus: command === "play" ? 2 : 1
+      }
+    });
+    dispatch({ type: command === "play" ? "playing/resume" : "playing/pause" });
+  } else {
+    result = dispatch({
+      type: "async:listenTogetherPlayList/playByTrackId",
+      payload: { id: targetId, commandType: "GOTO", playStatus: 1 }
+    });
+  }
+  if (result && typeof result.then === "function") await result;
+  await new Promise(resolve => setTimeout(resolve, 2500));
+  return true;
+})(__PAYLOAD__)
+""".replace("__CORE__", str(_module_ids()["core"])).replace(
+            "__PAYLOAD__",
+            json.dumps(
+                {
+                    "command": normalized,
+                    "currentId": current_id,
+                    "targetId": target_id,
+                    "progress": state.get("progress") or 0,
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+        )
+        websocket.evaluate(expression, await_promise=True)
+        return {
+            "success": True,
+            "command": normalized,
+            **_room_state_on_client(websocket),
+        }
+
+    with CLIENT_LOCK:
+        return _with_debugger(control)
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "NeteaseCompanionNative/1.0"
 
@@ -807,6 +1003,19 @@ class Handler(BaseHTTPRequestHandler):
     def _path(self) -> str:
         return urllib.parse.urlparse(self.path).path
 
+    def _read_json(self) -> dict[str, Any]:
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            length = 0
+        if length <= 0 or length > 65_536:
+            return {}
+        try:
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
     def do_GET(self) -> None:
         path = self._path()
         if path == "/health":
@@ -827,6 +1036,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, status_payload())
             elif path == "/v1/current":
                 self._send(200, current_song())
+            elif path == "/v1/rooms/playlist":
+                self._send(200, room_state())
             else:
                 self._send(404, {"error": "not found"})
         except Exception as exc:
@@ -842,6 +1053,15 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, create_room())
             elif path == "/v1/rooms/close":
                 self._send(200, close_room())
+            elif path == "/v1/rooms/add":
+                payload = self._read_json()
+                self._send(200, add_room_track(payload.get("trackId")))
+            elif path == "/v1/rooms/play":
+                payload = self._read_json()
+                self._send(200, play_room_track(payload.get("trackId")))
+            elif path == "/v1/rooms/control":
+                payload = self._read_json()
+                self._send(200, control_room(payload.get("command")))
             else:
                 self._send(404, {"error": "not found"})
         except Exception as exc:

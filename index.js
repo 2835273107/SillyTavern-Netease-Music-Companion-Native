@@ -28,6 +28,9 @@ const state = {
     playerSearchResults: [],
     lyricLines: [],
     lyricIndex: -1,
+    roomPlaylist: [],
+    roomPlaylistCurrentId: '',
+    comments: [],
     panelObserver: null,
 };
 
@@ -373,9 +376,16 @@ function resetTogetherPanel() {
     stopTogetherPolling();
     state.inTogetherRoom = false;
     state.currentSong = null;
+    state.roomPlaylist = [];
+    state.roomPlaylistCurrentId = '';
     setText('nmcnativeTogetherRoom', '未加入房间');
     setText('nmcnativeTogetherSong', '暂无歌曲信息');
+    setText('nmcnativeTogetherPlaylistState', '房间歌单尚未读取');
     setText('nmcnativeCharComment', '');
+    const playlist = element('nmcnativeTogetherPlaylist');
+    if (playlist) {
+        playlist.replaceChildren(option('', '— 刷新房间歌单后选择 —'));
+    }
     const invite = element('nmcnativeInviteLink');
     if (invite) {
         invite.removeAttribute('href');
@@ -706,6 +716,145 @@ async function sendTogetherMessage() {
     setMessage(`消息已发送到一起听伙伴的网易云私信（${result.sentTo}）。`, 'success');
 }
 
+function renderRoomPlaylist(data) {
+    state.roomPlaylist = Array.isArray(data?.songs) ? data.songs : [];
+    state.roomPlaylistCurrentId = String(data?.currentSongId || '');
+    const select = element('nmcnativeTogetherPlaylist');
+    if (select) {
+        select.replaceChildren(option('', state.roomPlaylist.length
+            ? '— 选择房间歌曲 —'
+            : '— 房间歌单为空 —'));
+        for (const song of state.roomPlaylist) {
+            const marker = String(song.id) === state.roomPlaylistCurrentId ? '（当前）' : '';
+            select.append(option(song.id, `${song.name}${song.artist ? ` · ${song.artist}` : ''}${marker}`));
+        }
+        if (state.roomPlaylistCurrentId && state.roomPlaylist.some(song => String(song.id) === state.roomPlaylistCurrentId)) {
+            select.value = state.roomPlaylistCurrentId;
+        }
+    }
+    setText(
+        'nmcnativeTogetherPlaylistState',
+        state.roomPlaylist.length
+            ? `房间歌单：${state.roomPlaylist.length} 首${data?.playStatus ? ` · ${data.playStatus}` : ''}`
+            : '房间歌单为空',
+    );
+    const toggle = element('nmcnativeTogetherToggle');
+    if (toggle) {
+        toggle.textContent = String(data?.playStatus || '').toUpperCase() === 'PAUSE'
+            ? '继续播放'
+            : '暂停';
+    }
+}
+
+async function refreshRoomPlaylist() {
+    const data = await api('/together/room-playlist');
+    renderRoomPlaylist(data);
+    return data;
+}
+
+function selectedPlayerSong() {
+    const selectedId = element('nmcnativePlayerSearchResults')?.value;
+    const searched = state.playerSearchResults.find(item => String(item.id) === String(selectedId));
+    if (searched) {
+        return searched;
+    }
+    return state.playerSong;
+}
+
+async function addSelectedPlayerSongToRoom() {
+    const song = selectedPlayerSong();
+    if (!song?.id) {
+        throw new Error('请先搜索并选择歌曲');
+    }
+    const data = await api('/together/room-playlist/add', {
+        method: 'POST',
+        body: { songId: String(song.id) },
+    });
+    renderRoomPlaylist(data);
+    setMessage(`已将《${song.name || song.songName}》添加到一起听房间歌单。`, 'success');
+}
+
+async function playSelectedRoomSong() {
+    const songId = element('nmcnativeTogetherPlaylist')?.value;
+    if (!songId) {
+        throw new Error('请先选择房间歌曲');
+    }
+    await api('/together/room-playlist/play', {
+        method: 'POST',
+        body: { songId },
+    });
+    await refreshRoomPlaylist();
+    setMessage('已向一起听房间发送切歌指令。', 'success');
+}
+
+async function controlTogetherRoom(command) {
+    await api('/together/control', {
+        method: 'POST',
+        body: { command },
+    });
+    await refreshRoomPlaylist();
+    setMessage(`已发送一起听控制指令：${command}`, 'success');
+}
+
+function renderSongComments(data) {
+    state.comments = Array.isArray(data?.comments) ? data.comments : [];
+    const container = element('nmcnativeSongComments');
+    if (!container) {
+        return;
+    }
+    container.replaceChildren();
+    if (!state.comments.length) {
+        const empty = document.createElement('p');
+        empty.className = 'nmcnative-comment-empty';
+        empty.textContent = '暂无评论';
+        container.append(empty);
+        return;
+    }
+    for (const comment of state.comments) {
+        const row = document.createElement('div');
+        row.className = 'nmcnative-comment';
+        const meta = document.createElement('div');
+        meta.className = 'nmcnative-comment-meta';
+        meta.textContent = `${comment.nickname || '网易云用户'} · 赞 ${comment.likedCount || 0}`;
+        const content = document.createElement('p');
+        content.textContent = comment.content || '';
+        row.append(meta, content);
+        container.append(row);
+    }
+}
+
+function currentCommentSongId() {
+    return String(state.playerSong?.id || element('nmcnativePlayerSearchResults')?.value || '');
+}
+
+async function loadSongComments() {
+    const songId = currentCommentSongId();
+    if (!songId) {
+        throw new Error('请先搜索、选择或播放歌曲');
+    }
+    renderSongComments(await api(`/song-comments/${encodeURIComponent(songId)}?limit=20`));
+    setMessage('歌曲评论已刷新。', 'success');
+}
+
+async function sendSongComment() {
+    const songId = currentCommentSongId();
+    const input = element('nmcnativeSongCommentInput');
+    const content = input?.value.trim();
+    if (!songId) {
+        throw new Error('请先搜索、选择或播放歌曲');
+    }
+    if (!content) {
+        throw new Error('请输入评论内容');
+    }
+    await api(`/song-comments/${encodeURIComponent(songId)}`, {
+        method: 'POST',
+        body: { content },
+    });
+    input.value = '';
+    await loadSongComments();
+    setMessage('歌曲评论已发布。', 'success');
+}
+
 async function refreshTogetherState() {
     if (!state.togetherEnabled) {
         return;
@@ -714,6 +863,7 @@ async function refreshTogetherState() {
     state.inTogetherRoom = result.inRoom === true;
     if (result.inRoom) {
         showInvite(result.roomId || '', result.inviteUrl || '');
+        await refreshRoomPlaylist().catch(() => {});
     } else {
         setText('nmcnativeTogetherRoom', '未加入房间');
     }
@@ -1245,6 +1395,39 @@ function injectStyles() {
             font-size: .8rem;
             overflow-wrap: anywhere;
         }
+        #netease-music-companion-native .nmcnative-comments {
+            max-height: 240px;
+            overflow-y: auto;
+            margin-top: 8px;
+            padding: 7px;
+            border-radius: 8px;
+            background: color-mix(in srgb, var(--SmartThemeBlurTintColor) 80%, transparent);
+        }
+        #netease-music-companion-native .nmcnative-comment {
+            padding: 7px 8px;
+            border-bottom: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor) 32%, transparent);
+        }
+        #netease-music-companion-native .nmcnative-comment:last-child {
+            border-bottom: 0;
+        }
+        #netease-music-companion-native .nmcnative-comment-meta {
+            font-size: .72rem;
+            opacity: .62;
+        }
+        #netease-music-companion-native .nmcnative-comment p {
+            margin: 3px 0 0;
+            font-size: .82rem;
+            line-height: 1.45;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+        }
+        #netease-music-companion-native .nmcnative-comment-empty {
+            margin: 0;
+            padding: 10px;
+            text-align: center;
+            font-size: .8rem;
+            opacity: .62;
+        }
         #netease-music-companion-native .nmcnative-message {
             margin-top: 12px;
             padding: 9px 10px;
@@ -1352,6 +1535,17 @@ function panelHtml() {
                 <div id="nmcnativePlayerLyrics" class="nmcnative-lyrics">
                     <p class="nmcnative-lyrics-empty">播放或选择歌曲后显示歌词</p>
                 </div>
+                <div class="nmcnative-actions">
+                    <button id="nmcnativeLoadSongComments" type="button">读取歌曲评论</button>
+                    <button id="nmcnativeSendSongComment" type="button">发布评论</button>
+                </div>
+                <div class="nmcnative-field">
+                    <label for="nmcnativeSongCommentInput">歌曲评论</label>
+                    <textarea id="nmcnativeSongCommentInput" maxlength="140" placeholder="写一条不超过 140 字的评论"></textarea>
+                </div>
+                <div id="nmcnativeSongComments" class="nmcnative-comments">
+                    <p class="nmcnative-comment-empty">载入歌曲后可读取评论</p>
+                </div>
                 <p class="nmcnative-note">音频通过插件后端代理播放。歌词会自动跟随播放进度，点击歌词可跳转。</p>
             </section>
 
@@ -1384,6 +1578,21 @@ function panelHtml() {
                     <button id="nmcnativeLeaveRoom" type="button">离开房间</button>
                 </div>
                 <p id="nmcnativeCharComment" class="nmcnative-status-line"></p>
+                <div class="nmcnative-field">
+                    <label for="nmcnativeTogetherPlaylist">房间歌单</label>
+                    <select id="nmcnativeTogetherPlaylist">
+                        <option value="">— 刷新房间歌单后选择 —</option>
+                    </select>
+                </div>
+                <p id="nmcnativeTogetherPlaylistState" class="nmcnative-status-line">房间歌单尚未读取</p>
+                <div class="nmcnative-actions">
+                    <button id="nmcnativeRefreshRoomPlaylist" type="button">刷新房间歌单</button>
+                    <button id="nmcnativeAddToRoomPlaylist" type="button">添加播放器选中歌曲</button>
+                    <button id="nmcnativePlayRoomSong" type="button">播放选中房间歌曲</button>
+                    <button id="nmcnativeTogetherPrevious" type="button">上一首</button>
+                    <button id="nmcnativeTogetherToggle" type="button">暂停</button>
+                    <button id="nmcnativeTogetherNext" type="button">下一首</button>
+                </div>
                 <div class="nmcnative-field">
                     <label for="nmcnativeTogetherMessage">发送给一起听伙伴的消息</label>
                     <textarea id="nmcnativeTogetherMessage" maxlength="500" placeholder="输入消息..."></textarea>
@@ -1638,6 +1847,33 @@ function bindEvents() {
             void withBusy('正在发送消息...', sendTogetherMessage);
         }
     });
+    element('nmcnativeLoadSongComments').addEventListener('click', () => {
+        void withBusy('正在读取评论...', loadSongComments);
+    });
+    element('nmcnativeSendSongComment').addEventListener('click', () => {
+        void withBusy('正在发布评论...', sendSongComment);
+    });
+    element('nmcnativeRefreshRoomPlaylist').addEventListener('click', () => {
+        void withBusy('正在读取一起听房间歌单...', refreshRoomPlaylist);
+    });
+    element('nmcnativeAddToRoomPlaylist').addEventListener('click', () => {
+        void withBusy('正在添加歌曲到房间...', addSelectedPlayerSongToRoom);
+    });
+    element('nmcnativePlayRoomSong').addEventListener('click', () => {
+        void withBusy('正在切换房间歌曲...', playSelectedRoomSong);
+    });
+    element('nmcnativeTogetherPrevious').addEventListener('click', () => {
+        void withBusy('正在切换上一首...', () => controlTogetherRoom('previous'));
+    });
+    element('nmcnativeTogetherToggle').addEventListener('click', () => {
+        const command = element('nmcnativeTogetherToggle').textContent.includes('继续')
+            ? 'play'
+            : 'pause';
+        void withBusy('正在同步播放状态...', () => controlTogetherRoom(command));
+    });
+    element('nmcnativeTogetherNext').addEventListener('click', () => {
+        void withBusy('正在切换下一首...', () => controlTogetherRoom('next'));
+    });
 
     element('nmcnativeTogetherLink').addEventListener('change', () => {
         const value = element('nmcnativeTogetherLink').value.trim();
@@ -1727,6 +1963,9 @@ function bindEvents() {
                 : await api('/together/create', { method: 'POST', body: {} });
             showInvite(result.roomId, result.inviteUrl);
             await refreshNativeServiceState();
+            if (result.roomId) {
+                await refreshRoomPlaylist().catch(() => {});
+            }
             setMessage(
                 mode === 'native'
                     ? '独立原生服务已创建并激活房间，邀请已由桌面客户端发送。'

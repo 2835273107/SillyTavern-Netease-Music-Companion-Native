@@ -413,6 +413,251 @@ async function resolveSongPlaybackUrl(songId, cookie, level = 'standard') {
     };
 }
 
+function normalIdList(value) {
+    const source = value?.result ?? value?.list ?? value;
+    if (!Array.isArray(source)) {
+        return [];
+    }
+    return [...new Set(source
+        .map(item => cleanText(item?.songId ?? item?.id ?? item, 80))
+        .filter(id => /^\d{1,20}$/.test(id)))];
+}
+
+async function getTogetherSnapshot(accountId, cookie) {
+    const { body: statusBody } = await requestNetease('/listentogether/status', { cookie });
+    const current = parseCurrentSong(statusBody);
+    const cached = roomCache.get(accountId);
+    const roomId = cleanText(cached?.roomId || current.roomId, 240);
+    if (!roomId) {
+        throw new PublicError('当前不在一起听房间中', 409);
+    }
+    const { body: syncBody } = await requestNetease('/listentogether/sync/playlist/get', {
+        method: 'POST',
+        params: { roomId },
+        cookie,
+    });
+    const data = upstreamData(syncBody) || {};
+    const playlist = data.playlist || {};
+    const displayList = normalIdList(playlist.displayList);
+    const randomList = normalIdList(playlist.randomList);
+    return {
+        roomId,
+        current,
+        playlist,
+        displayList,
+        randomList: randomList.length ? randomList : displayList,
+        playCommand: data.playCommand || data.playInfo || {},
+        versions: Array.isArray(playlist.version)
+            ? playlist.version.map(item => ({
+                userId: cleanText(item?.userId, 80),
+                version: Number(item?.version) || 0,
+            }))
+            : [],
+    };
+}
+
+async function roomPlaylistResponse(accountId, cookie) {
+    const snapshot = await getTogetherSnapshot(accountId, cookie);
+    const ids = snapshot.displayList.slice(0, 100);
+    let songs = [];
+    if (ids.length) {
+        const detail = await requestNetease('/song/detail', {
+            params: { ids: ids.join(',') },
+            cookie,
+        });
+        const rawSongs = upstreamData(detail.body)?.songs || detail.body?.songs || [];
+        const byId = new Map(rawSongs.map(song => [String(song.id), song]));
+        songs = ids.map(id => {
+            const song = byId.get(id) || {};
+            const artists = song.ar || song.artists || [];
+            return {
+                id,
+                name: cleanText(song.name, 200) || `歌曲 ${id}`,
+                artist: artists.map(item => item.name).filter(Boolean).join(', '),
+                album: cleanText(song.al?.name || song.album?.name, 200),
+                duration: Number(song.dt || song.duration) || 0,
+            };
+        });
+    }
+    return {
+        roomId: snapshot.roomId,
+        songs,
+        currentSongId: cleanText(
+            snapshot.playCommand.targetSongId || snapshot.current.songId,
+            80,
+        ),
+        playStatus: cleanText(snapshot.playCommand.playStatus, 40),
+        progress: Number(snapshot.playCommand.progress) || 0,
+        clientSeq: Number(snapshot.playCommand.clientSeq) || 0,
+    };
+}
+
+function normalizeRoomPlayStatus(value) {
+    const text = String(value ?? '').toUpperCase();
+    if (text === '2' || text === 'PLAY') {
+        return 'PLAY';
+    }
+    if (text === '1' || text === 'PAUSE') {
+        return 'PAUSE';
+    }
+    return text;
+}
+
+async function nativeRoomPlaylistResponse(cookie) {
+    const state = await nativeBridge.getRoomPlaylist();
+    const ids = Array.isArray(state.trackIds)
+        ? state.trackIds.map(id => cleanText(id, 80)).filter(Boolean)
+        : [];
+    let songs = [];
+    if (ids.length) {
+        const detail = await requestNetease('/song/detail', {
+            params: { ids: ids.join(',') },
+            cookie,
+        });
+        const rawSongs = upstreamData(detail.body)?.songs || detail.body?.songs || [];
+        const byId = new Map(rawSongs.map(song => [String(song.id), song]));
+        songs = ids.map(id => {
+            const song = byId.get(id) || {};
+            return {
+                id,
+                name: cleanText(song.name, 200) || `歌曲 ${id}`,
+                artist: (song.ar || song.artists || [])
+                    .map(item => item.name)
+                    .filter(Boolean)
+                    .join(', '),
+                album: cleanText(song.al?.name || song.album?.name, 200),
+                duration: Number(song.dt || song.duration) || 0,
+            };
+        });
+    }
+    return {
+        roomId: '',
+        songs,
+        currentSongId: cleanText(state.currentSongId, 80),
+        playStatus: normalizeRoomPlayStatus(state.playStatus),
+        progress: Number(state.progress) || 0,
+        clientSeq: Number(state.clientSeq) || 0,
+    };
+}
+
+async function replaceTogetherRoomPlaylist(accountId, cookie, nextIds) {
+    const snapshot = await getTogetherSnapshot(accountId, cookie);
+    const { account } = getActiveAccount();
+    const userId = cleanText(account.userId, 80);
+    if (!userId) {
+        throw new PublicError('当前账号缺少网易云数字用户 ID，请重新检查登录状态');
+    }
+    const versions = snapshot.versions.map(item => ({ ...item }));
+    const mine = versions.find(item => item.userId === userId);
+    if (mine) {
+        mine.version += 1;
+    } else {
+        versions.push({ userId, version: 1 });
+    }
+    const displayList = [...new Set(nextIds)];
+    await requestNetease('/api', {
+        method: 'POST',
+        params: {
+            uri: '/api/listen/together/sync/list/command/report',
+            crypto: 'eapi',
+            data: JSON.stringify({
+                roomId: snapshot.roomId,
+                playlistParam: JSON.stringify({
+                    commandType: 'REPLACE',
+                    version: versions,
+                    anchorSongId: '',
+                    anchorPosition: -1,
+                    playMode: 'ORDER_LOOP',
+                    randomList: displayList,
+                    displayList,
+                }),
+            }),
+        },
+        cookie,
+    });
+    return { ...snapshot, displayList, versions };
+}
+
+async function playTogetherRoomSong(accountId, cookie, targetSongId) {
+    const snapshot = await getTogetherSnapshot(accountId, cookie);
+    const target = cleanText(targetSongId, 80);
+    if (!/^\d{1,20}$/.test(target)) {
+        throw new PublicError('targetSongId 无效');
+    }
+    if (!snapshot.displayList.includes(target)) {
+        throw new PublicError('目标歌曲不在当前一起听房间歌单中');
+    }
+    const formerSongId = cleanText(
+        snapshot.playCommand.targetSongId || snapshot.current.songId,
+        80,
+    ) || '-1';
+    const nextSeq = (Number(snapshot.playCommand.clientSeq) || 0) + 1;
+    await requestNetease('/listentogether/play/command', {
+        method: 'POST',
+        params: {
+            roomId: snapshot.roomId,
+            commandType: 'GOTO',
+            progress: 0,
+            playStatus: 'PLAY',
+            formerSongId,
+            targetSongId: target,
+            clientSeq: nextSeq,
+        },
+        cookie,
+    });
+    return { roomId: snapshot.roomId, targetSongId: target, clientSeq: nextSeq };
+}
+
+async function controlTogetherRoom(accountId, cookie, command) {
+    const normalized = cleanText(command, 20).toLowerCase();
+    if (!['play', 'pause', 'next', 'previous'].includes(normalized)) {
+        throw new PublicError('command 仅支持 play、pause、next、previous');
+    }
+    const snapshot = await getTogetherSnapshot(accountId, cookie);
+    const list = snapshot.displayList;
+    if (!list.length) {
+        throw new PublicError('当前一起听房间歌单为空');
+    }
+    const currentSongId = cleanText(
+        snapshot.playCommand.targetSongId || snapshot.current.songId,
+        80,
+    ) || list[0];
+    const currentIndex = Math.max(0, list.indexOf(currentSongId));
+    let targetSongId = currentSongId;
+    let commandType;
+    if (normalized === 'next') {
+        targetSongId = list[(currentIndex + 1) % list.length];
+        commandType = 'GOTO';
+    } else if (normalized === 'previous') {
+        targetSongId = list[(currentIndex - 1 + list.length) % list.length];
+        commandType = 'GOTO';
+    } else {
+        commandType = normalized === 'play' ? 'PLAY' : 'PAUSE';
+    }
+    const nextSeq = (Number(snapshot.playCommand.clientSeq) || 0) + 1;
+    await requestNetease('/listentogether/play/command', {
+        method: 'POST',
+        params: {
+            roomId: snapshot.roomId,
+            commandType,
+            progress: commandType === 'GOTO'
+                ? 0
+                : Number(snapshot.playCommand.progress) || 0,
+            playStatus: normalized === 'pause' ? 'PAUSE' : 'PLAY',
+            formerSongId: currentSongId || '-1',
+            targetSongId,
+            clientSeq: nextSeq,
+        },
+        cookie,
+    });
+    return {
+        roomId: snapshot.roomId,
+        command: normalized,
+        targetSongId,
+        clientSeq: nextSeq,
+    };
+}
+
 async function fetchPlaylistTrackIds(playlistId, cookie) {
     const { body } = await requestNetease('/playlist/detail', {
         params: { id: playlistId },
@@ -1099,6 +1344,84 @@ export async function init(router) {
         Readable.fromWeb(upstream.body).pipe(response);
     }));
 
+    router.get('/song-comments/:songId', wrapRoute(async (request, response) => {
+        const songId = cleanText(request.params.songId, 80);
+        const offset = Math.max(0, Number(request.query.offset) || 0);
+        const limit = Math.min(50, Math.max(1, Number(request.query.limit) || 20));
+        if (!/^\d{1,20}$/.test(songId)) {
+            throw new PublicError('songId 必须是数字歌曲 ID');
+        }
+        const cookie = activeCookieOrThrow();
+        const { body } = await requestNetease('/comment/music', {
+            params: { id: songId, limit, offset },
+            cookie,
+        });
+        const data = upstreamData(body) || {};
+        const hot = Array.isArray(data.hotComments) ? data.hotComments : [];
+        const comments = Array.isArray(data.comments) ? data.comments : [];
+        const seen = new Set();
+        const normalized = [...hot, ...comments]
+            .filter(item => {
+                const id = cleanText(item?.commentId, 80);
+                if (!id || seen.has(id)) {
+                    return false;
+                }
+                seen.add(id);
+                return true;
+            })
+            .map(item => ({
+                id: cleanText(item?.commentId, 80),
+                content: cleanText(item?.content, 500),
+                nickname: cleanText(item?.user?.nickname, 80),
+                avatarUrl: cleanText(item?.user?.avatarUrl, 1000),
+                likedCount: Number(item?.likedCount) || 0,
+                time: Number(item?.time) || 0,
+                replyCount: Number(item?.replyCount) || 0,
+            }));
+        response.json({
+            songId,
+            total: Number(data.total) || normalized.length,
+            more: data.more === true,
+            comments: normalized,
+        });
+    }));
+
+    router.post('/song-comments/:songId', wrapRoute(async (request, response) => {
+        const songId = cleanText(request.params.songId, 80);
+        const content = cleanText(request.body?.content, 140);
+        if (!/^\d{1,20}$/.test(songId)) {
+            throw new PublicError('songId 必须是数字歌曲 ID');
+        }
+        if (!content) {
+            throw new PublicError('评论内容不能为空');
+        }
+        const cookie = activeCookieOrThrow();
+        const { body } = await requestNetease('/comment', {
+            method: 'POST',
+            params: {
+                id: songId,
+                type: 0,
+                t: 1,
+                content,
+            },
+            cookie,
+        });
+        const data = upstreamData(body) || {};
+        const code = Number(body?.code ?? data.code);
+        if (Number.isFinite(code) && code !== 200) {
+            throw new PublicError(
+                cleanText(body?.message || data.message, 240) || '评论发布失败',
+                502,
+            );
+        }
+        response.json({
+            ok: true,
+            songId,
+            content,
+            comment: data.comment || null,
+        });
+    }));
+
     router.get('/together/status', wrapRoute(async (_request, response) => {
         if (rejectTogetherDisabled(response)) {
             return;
@@ -1144,6 +1467,74 @@ export async function init(router) {
             accountMatchesClient: !clientUid || !accountUid || clientUid === accountUid,
             accountMatchesCookie: !cookieUid || !accountUid || cookieUid === accountUid,
         });
+    }));
+
+    router.get('/together/room-playlist', wrapRoute(async (_request, response) => {
+        if (rejectTogetherDisabled(response)) {
+            return;
+        }
+        const { accountId } = getActiveAccount();
+        const cookie = activeCookieOrThrow();
+        response.json(nativeBridge.describe().running
+            ? await nativeRoomPlaylistResponse(cookie)
+            : await roomPlaylistResponse(accountId, cookie));
+    }));
+
+    router.post('/together/room-playlist/add', wrapRoute(async (request, response) => {
+        if (rejectTogetherDisabled(response)) {
+            return;
+        }
+        const songId = cleanText(request.body?.songId, 80);
+        if (!/^\d{1,20}$/.test(songId)) {
+            throw new PublicError('songId 必须是数字歌曲 ID');
+        }
+        const { accountId } = getActiveAccount();
+        const cookie = activeCookieOrThrow();
+        if (nativeBridge.describe().running) {
+            await nativeBridge.addRoomTrack(songId);
+            response.json(await nativeRoomPlaylistResponse(cookie));
+            return;
+        }
+        const snapshot = await getTogetherSnapshot(accountId, cookie);
+        if (!snapshot.displayList.includes(songId)) {
+            await replaceTogetherRoomPlaylist(
+                accountId,
+                cookie,
+                [...snapshot.displayList, songId],
+            );
+        }
+        await new Promise(resolve => setTimeout(resolve, 500));
+        response.json(await roomPlaylistResponse(accountId, cookie));
+    }));
+
+    router.post('/together/room-playlist/play', wrapRoute(async (request, response) => {
+        if (rejectTogetherDisabled(response)) {
+            return;
+        }
+        const songId = cleanText(request.body?.songId, 80);
+        const { accountId } = getActiveAccount();
+        const cookie = activeCookieOrThrow();
+        if (nativeBridge.describe().running) {
+            await nativeBridge.playRoomTrack(songId);
+            response.json(await nativeRoomPlaylistResponse(cookie));
+            return;
+        }
+        response.json(await playTogetherRoomSong(accountId, cookie, songId));
+    }));
+
+    router.post('/together/control', wrapRoute(async (request, response) => {
+        if (rejectTogetherDisabled(response)) {
+            return;
+        }
+        const { accountId } = getActiveAccount();
+        const cookie = activeCookieOrThrow();
+        const command = request.body?.command;
+        if (nativeBridge.describe().running) {
+            await nativeBridge.controlRoom(command);
+            response.json(await nativeRoomPlaylistResponse(cookie));
+            return;
+        }
+        response.json(await controlTogetherRoom(accountId, cookie, command));
     }));
 
     router.post('/together/native/create', wrapRoute(async (_request, response) => {

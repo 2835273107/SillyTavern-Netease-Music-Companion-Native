@@ -287,6 +287,31 @@ export class TogetherBridge {
         return this.request('/v1/rooms/close', { method: 'POST', body: {} });
     }
 
+    async getRoomPlaylist() {
+        return this.request('/v1/rooms/playlist');
+    }
+
+    async addRoomTrack(trackId) {
+        return this.request('/v1/rooms/add', {
+            method: 'POST',
+            body: { trackId: String(trackId) },
+        });
+    }
+
+    async playRoomTrack(trackId) {
+        return this.request('/v1/rooms/play', {
+            method: 'POST',
+            body: { trackId: String(trackId) },
+        });
+    }
+
+    async controlRoom(command) {
+        return this.request('/v1/rooms/control', {
+            method: 'POST',
+            body: { command: String(command) },
+        });
+    }
+
     describe() {
         if (!this.service) {
             return { running: false, source: 'native' };

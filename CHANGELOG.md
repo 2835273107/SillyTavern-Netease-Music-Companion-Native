@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.0
+
+- Added the official desktop client's live room playlist to the plugin.
+- Added room song selection, add-to-room and play/previous/pause/next controls.
+- Added song-comment reading and publishing.
+- Added native service room playlist, add, play and control endpoints.
+- Documented shared room playlist, song switching, comments and the
+  participant requirement for synchronized playback.
+
 ## 1.1.0
 
 - Added an in-SillyTavern music player with same-origin audio proxying and
