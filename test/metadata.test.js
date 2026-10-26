@@ -15,9 +15,9 @@ test('keeps manifest, package and config on the native namespace', () => {
     const backend = read('plugin/index.js');
     const service = read('plugin/together-native/service.py');
 
-    assert.equal(manifest.version, '1.3.0');
+    assert.equal(manifest.version, '1.4.0');
     assert.equal(manifest.homePage.endsWith('SillyTavern-Netease-Music-Companion-Native'), true);
-    assert.equal(packageJson.version, '1.3.0');
+    assert.equal(packageJson.version, '1.4.0');
     assert.match(frontend, /nmcnativePlayerLyrics/);
     assert.match(backend, /\/song-audio\/:songId/);
     assert.match(backend, /\/together\/send-message/);
@@ -27,6 +27,10 @@ test('keeps manifest, package and config on the native namespace', () => {
     assert.match(backend, /\/player\/playlist-tracks\/:playlistId/);
     assert.match(frontend, /nmcnativePlayerPlaylistTrack/);
     assert.match(frontend, /data-nmcnative-tab/);
+    assert.match(frontend, /ToolManager\.registerFunctionTool/);
+    assert.match(frontend, /characterCommentOnSong/);
+    assert.match(frontend, /playNextPlayerSong/);
+    assert.match(backend, /\/song-info\/:songId/);
     assert.equal(packageJson.name, 'sillytavern-netease-music-companion-native');
     assert.equal(config.togetherNative.port, 3472);
     assert.equal(config.togetherNative.autoStart, false);

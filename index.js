@@ -6,6 +6,7 @@ import {
 } from '../../../../script.js';
 import { extension_settings } from '../../../extensions.js';
 import { getContext } from '../../../st-context.js';
+import { ToolManager } from '../../../../scripts/tool-calling.js';
 
 const EXTENSION_KEY = 'neteaseMusicCompanionNative';
 const DEFAULT_BACKEND = '/api/plugins/netease-music-native';
@@ -29,6 +30,9 @@ const state = {
     playerPlaylists: [],
     playerPlaylistTracks: [],
     playerSelectionSource: 'search',
+    playerQueue: [],
+    playerQueueIndex: -1,
+    playerAutoAdvancing: false,
     lyricLines: [],
     lyricIndex: -1,
     roomPlaylist: [],
@@ -49,6 +53,15 @@ function initializeSettings() {
     }
     if (!['player', 'together', 'playlists', 'account'].includes(extension_settings[EXTENSION_KEY].activeTab)) {
         extension_settings[EXTENSION_KEY].activeTab = 'player';
+    }
+    if (typeof extension_settings[EXTENSION_KEY].continuousPlayback !== 'boolean') {
+        extension_settings[EXTENSION_KEY].continuousPlayback = true;
+    }
+    if (typeof extension_settings[EXTENSION_KEY].characterAutoSelect !== 'boolean') {
+        extension_settings[EXTENSION_KEY].characterAutoSelect = true;
+    }
+    if (typeof extension_settings[EXTENSION_KEY].conversationTools !== 'boolean') {
+        extension_settings[EXTENSION_KEY].conversationTools = false;
     }
 }
 
@@ -625,7 +638,7 @@ function syncPlayerLyrics() {
     active?.scrollIntoView({ block: 'center', behavior: 'smooth' });
 }
 
-async function loadPlayerSong(song, { autoplay = false } = {}) {
+async function loadPlayerSong(song, { autoplay = false, queue = null } = {}) {
     if (!song?.id) {
         throw new Error('缺少歌曲 ID');
     }
@@ -635,6 +648,15 @@ async function loadPlayerSong(song, { autoplay = false } = {}) {
         artist: String(song.artist || song.artists || ''),
         album: String(song.album || ''),
     };
+    if (Array.isArray(queue)) {
+        state.playerQueue = queue.filter(item => item?.id);
+        state.playerQueueIndex = state.playerQueue.findIndex(
+            item => String(item.id) === String(state.playerSong.id),
+        );
+    } else if (!state.playerQueue.some(item => String(item.id) === String(state.playerSong.id))) {
+        state.playerQueue = [state.playerSong];
+        state.playerQueueIndex = 0;
+    }
     setText(
         'nmcnativePlayerSong',
         `《${state.playerSong.name}》${state.playerSong.artist ? ` · ${state.playerSong.artist}` : ''}${state.playerSong.album ? ` · ${state.playerSong.album}` : ''}`,
@@ -722,7 +744,10 @@ async function playSelectedPlayerPlaylistSong() {
         throw new Error('请先加载歌单并选择歌曲');
     }
     state.playerSelectionSource = 'playlist';
-    await loadPlayerSong(song, { autoplay: true });
+    await loadPlayerSong(song, {
+        autoplay: true,
+        queue: state.playerPlaylistTracks,
+    });
 }
 
 async function searchPlayerSongs() {
@@ -761,7 +786,10 @@ async function playSelectedPlayerSong() {
     if (!song) {
         throw new Error('请先搜索并选择歌曲');
     }
-    await loadPlayerSong(song, { autoplay: true });
+    await loadPlayerSong(song, {
+        autoplay: true,
+        queue: state.playerSearchResults,
+    });
 }
 
 async function playCurrentTogetherSong() {
@@ -769,12 +797,125 @@ async function playCurrentTogetherSong() {
     if (!state.currentSong?.songId) {
         throw new Error('一起听房间没有可用歌曲 ID，请先刷新当前歌曲');
     }
-    await loadPlayerSong({
+    const roomSong = {
         id: state.currentSong.songId,
         name: state.currentSong.songName,
         artist: state.currentSong.artist,
         album: state.currentSong.album,
-    }, { autoplay: true });
+    };
+    await loadPlayerSong(roomSong, {
+        autoplay: true,
+        queue: state.roomPlaylist.length ? state.roomPlaylist : [roomSong],
+    });
+}
+
+async function playNextPlayerSong({ automatic = false } = {}) {
+    if (automatic && !extension_settings[EXTENSION_KEY].continuousPlayback) {
+        return;
+    }
+    if (!state.playerQueue.length) {
+        throw new Error('播放队列为空');
+    }
+    if (state.playerAutoAdvancing) {
+        return;
+    }
+    state.playerAutoAdvancing = true;
+    try {
+        const currentId = String(state.playerSong?.id || '');
+        const currentIndex = state.playerQueue.findIndex(
+            item => String(item.id) === currentId,
+        );
+        let selected = null;
+        if (
+            extension_settings[EXTENSION_KEY].characterAutoSelect
+            && state.playerQueue.length > 1
+        ) {
+            const candidates = state.playerQueue
+                .filter(item => String(item.id) !== currentId)
+                .slice(0, 40)
+                .map(item => ({
+                    songId: String(item.id),
+                    name: item.name,
+                    artist: item.artist || '',
+                }));
+            try {
+                const reply = await quiet(
+                    `你是 {{char}}。当前播放的是《${state.playerSong?.name || ''}》。请根据你的人格、背景和最近对话，从以下候选歌曲中选择下一首：${JSON.stringify(candidates)}。输出严格 JSON：{"songId":"候选中的歌曲ID","reason":"一句话理由"}。只输出 JSON。`,
+                    { candidateGuard: false },
+                );
+                const parsed = parseJsonReply(reply);
+                selected = state.playerQueue.find(
+                    item => String(item.id) === String(parsed.songId),
+                ) || null;
+            } catch {
+                selected = null;
+            }
+        }
+        if (!selected) {
+            const fallbackIndex = currentIndex >= 0
+                ? (currentIndex + 1) % state.playerQueue.length
+                : 0;
+            selected = state.playerQueue[fallbackIndex];
+        }
+        if (!selected) {
+            throw new Error('无法选择下一首歌曲');
+        }
+        await loadPlayerSong(selected, {
+            autoplay: true,
+            queue: state.playerQueue,
+        });
+        setMessage(
+            automatic
+                ? `已自动切换到《${selected.name || '下一首'}》。`
+                : `已切换到《${selected.name || '下一首'}》。`,
+            'success',
+        );
+    } finally {
+        state.playerAutoAdvancing = false;
+    }
+}
+
+async function playPreviousPlayerSong() {
+    if (!state.playerQueue.length) {
+        throw new Error('播放队列为空');
+    }
+    const currentId = String(state.playerSong?.id || '');
+    const currentIndex = state.playerQueue.findIndex(
+        item => String(item.id) === currentId,
+    );
+    const previousIndex = currentIndex >= 0
+        ? (currentIndex - 1 + state.playerQueue.length) % state.playerQueue.length
+        : 0;
+    const selected = state.playerQueue[previousIndex];
+    await loadPlayerSong(selected, {
+        autoplay: true,
+        queue: state.playerQueue,
+    });
+}
+
+async function controlPlayer(action) {
+    const audio = element('nmcnativePlayerAudio');
+    const normalized = String(action || '').toLowerCase();
+    if (normalized === 'play') {
+        if (!audio?.src) {
+            throw new Error('播放器尚未载入歌曲');
+        }
+        await audio.play();
+        return { action: normalized, songId: state.playerSong?.id || '' };
+    }
+    if (normalized === 'pause') {
+        audio?.pause();
+        return { action: normalized, songId: state.playerSong?.id || '' };
+    }
+    if (normalized === 'next') {
+        await playNextPlayerSong();
+        return { action: normalized, songId: state.playerSong?.id || '' };
+    }
+    if (normalized === 'previous') {
+        await playPreviousPlayerSong();
+        return { action: normalized, songId: state.playerSong?.id || '' };
+    }
+    throw new Error('播放控制仅支持 play、pause、next、previous');
 }
 
 async function sendTogetherMessage() {
@@ -916,7 +1057,7 @@ function renderSongComments(data) {
 }
 
 function currentCommentSongId() {
-    return String(state.playerSong?.id || element('nmcnativePlayerSearchResults')?.value || '');
+    return String(selectedPlayerSong()?.id || state.playerSong?.id || '');
 }
 
 async function loadSongComments() {
@@ -928,23 +1069,245 @@ async function loadSongComments() {
     setMessage('歌曲评论已刷新。', 'success');
 }
 
-async function sendSongComment() {
-    const songId = currentCommentSongId();
-    const input = element('nmcnativeSongCommentInput');
-    const content = input?.value.trim();
-    if (!songId) {
-        throw new Error('请先搜索、选择或播放歌曲');
-    }
-    if (!content) {
-        throw new Error('请输入评论内容');
+async function postSongComment(songId, content) {
+    const normalizedContent = String(content || '').trim().slice(0, 140);
+    if (!normalizedContent) {
+        throw new Error('评论内容不能为空');
     }
     await api(`/song-comments/${encodeURIComponent(songId)}`, {
         method: 'POST',
-        body: { content },
+        body: { content: normalizedContent },
     });
-    input.value = '';
-    await loadSongComments();
-    setMessage('歌曲评论已发布。', 'success');
+    await loadSongComments().catch(() => {});
+    return normalizedContent;
+}
+
+async function characterCommentOnSong() {
+    const songId = currentCommentSongId();
+    if (!songId) {
+        throw new Error('请先搜索、选择或播放歌曲');
+    }
+    const song = state.playerSong?.id === songId
+        ? state.playerSong
+        : selectedPlayerSong();
+    if (!song) {
+        throw new Error('缺少歌曲信息');
+    }
+    const generated = await quiet(
+        `你是 {{char}}。你正在听《${song.name || song.songName || ''}》${song.artist ? ` - ${song.artist}` : ''}。请完全以角色本人的人格、经历和说话方式，写一条发布在网易云歌曲评论区的短评，不超过 140 个中文字符，不要自称 AI，不要解释，不要加引号，只输出评论正文。`,
+        { candidateGuard: false },
+    );
+    const content = await postSongComment(songId, generated);
+    setText('nmcnativeGeneratedComment', content);
+    setMessage(`角色评论已发布：${content}`, 'success');
+    return content;
+}
+
+async function resolveSongForTool({ query = '', songId = '', limit = 5 } = {}) {
+    if (songId) {
+        return await api(`/song-info/${encodeURIComponent(String(songId))}`);
+    }
+    const keyword = String(query || '').trim();
+    if (!keyword) {
+        throw new Error('必须提供 query 或 songId');
+    }
+    const candidates = await api('/search-with-lyric', {
+        method: 'POST',
+        body: { keyword, limit: Math.min(10, Math.max(1, Number(limit) || 5)) },
+    });
+    if (!Array.isArray(candidates) || !candidates.length) {
+        throw new Error(`没有找到与「${keyword}」匹配的歌曲`);
+    }
+    return candidates[0];
+}
+
+async function toolPlaySong(args = {}) {
+    const song = await resolveSongForTool(args);
+    state.playerSelectionSource = 'search';
+    await loadPlayerSong(song, {
+        autoplay: true,
+        queue: [song],
+    });
+    return { ok: true, song };
+}
+
+async function toolAddSongToRoom(args = {}) {
+    const song = await resolveSongForTool(args);
+    await api('/together/room-playlist/add', {
+        method: 'POST',
+        body: { songId: String(song.id) },
+    });
+    await refreshRoomPlaylist().catch(() => {});
+    return { ok: true, song };
+}
+
+async function toolCommentSong(args = {}) {
+    const song = args.songId
+        ? await resolveSongForTool({ songId: args.songId })
+        : selectedPlayerSong();
+    if (!song?.id) {
+        throw new Error('当前没有可用于评论的歌曲');
+    }
+    const content = String(args.content || '').trim()
+        || await quiet(
+            `你是 {{char}}。请以角色本人的口吻，为《${song.name || song.songName || ''}》${song.artist ? ` - ${song.artist}` : ''}写一条网易云歌曲短评，不超过 140 字。不要自称 AI，不要解释，只输出评论正文。`,
+            { candidateGuard: false },
+        );
+    const posted = await postSongComment(song.id, content);
+    setText('nmcnativeGeneratedComment', posted);
+    return { ok: true, songId: String(song.id), content: posted };
+}
+
+async function toolGetMusicState() {
+    const audio = element('nmcnativePlayerAudio');
+    return {
+        player: state.playerSong
+            ? {
+                songId: state.playerSong.id,
+                name: state.playerSong.name,
+                artist: state.playerSong.artist,
+                playing: Boolean(audio && !audio.paused),
+                currentTime: Number(audio?.currentTime) || 0,
+                queueLength: state.playerQueue.length,
+            }
+            : null,
+        togetherRoom: state.inTogetherRoom,
+        roomPlaylistCount: state.roomPlaylist.length,
+    };
+}
+
+const FUNCTION_TOOL_NAMES = [
+    'netease_companion_search',
+    'netease_companion_play',
+    'netease_companion_control',
+    'netease_companion_add_to_room',
+    'netease_companion_room_control',
+    'netease_companion_comment',
+    'netease_companion_state',
+];
+
+function unregisterConversationTools() {
+    for (const name of FUNCTION_TOOL_NAMES) {
+        ToolManager.unregisterFunctionTool(name);
+    }
+}
+
+function syncConversationTools() {
+    unregisterConversationTools();
+    if (!extension_settings[EXTENSION_KEY]?.conversationTools) {
+        return;
+    }
+    const shouldRegister = () => extension_settings[EXTENSION_KEY]?.conversationTools === true;
+    ToolManager.registerFunctionTool({
+        name: 'netease_companion_search',
+        displayName: '搜索网易云歌曲',
+        description: '搜索网易云歌曲并返回歌曲 ID、名称、歌手和歌词片段。需要主动为角色选歌时可先搜索。',
+        parameters: {
+            type: 'object',
+            properties: {
+                query: { type: 'string', description: '歌曲、歌手或关键词' },
+                limit: { type: 'integer', minimum: 1, maximum: 10, default: 5 },
+            },
+            required: ['query'],
+        },
+        action: async args => JSON.stringify(
+            await api('/search-with-lyric', {
+                method: 'POST',
+                body: { keyword: args.query, limit: args.limit || 5 },
+            }),
+        ),
+        shouldRegister,
+    });
+    ToolManager.registerFunctionTool({
+        name: 'netease_companion_play',
+        displayName: '在酒馆播放网易云歌曲',
+        description: '在 SillyTavern 内播放歌曲。可根据关键词选择第一首匹配歌曲，也可使用明确 songId。',
+        parameters: {
+            type: 'object',
+            properties: {
+                query: { type: 'string', description: '歌曲名称和歌手' },
+                songId: { type: 'string', description: '网易云数字歌曲 ID' },
+            },
+        },
+        action: async args => JSON.stringify(await toolPlaySong(args)),
+        shouldRegister,
+    });
+    ToolManager.registerFunctionTool({
+        name: 'netease_companion_control',
+        displayName: '控制酒馆播放器',
+        description: '控制 SillyTavern 播放器的播放、暂停、上一首和下一首。',
+        parameters: {
+            type: 'object',
+            properties: {
+                action: {
+                    type: 'string',
+                    enum: ['play', 'pause', 'next', 'previous'],
+                },
+            },
+            required: ['action'],
+        },
+        action: async args => JSON.stringify(await controlPlayer(args.action)),
+        shouldRegister,
+    });
+    ToolManager.registerFunctionTool({
+        name: 'netease_companion_add_to_room',
+        displayName: '添加歌曲到一起听房间',
+        description: '把匹配歌曲添加到当前一起听房间歌单，需要房间已经创建。',
+        parameters: {
+            type: 'object',
+            properties: {
+                query: { type: 'string', description: '歌曲名称和歌手' },
+                songId: { type: 'string', description: '网易云数字歌曲 ID' },
+            },
+        },
+        action: async args => JSON.stringify(await toolAddSongToRoom(args)),
+        shouldRegister,
+    });
+    ToolManager.registerFunctionTool({
+        name: 'netease_companion_room_control',
+        displayName: '控制一起听房间',
+        description: '控制当前一起听房间的播放、暂停、上一首和下一首。',
+        parameters: {
+            type: 'object',
+            properties: {
+                action: {
+                    type: 'string',
+                    enum: ['play', 'pause', 'next', 'previous'],
+                },
+            },
+            required: ['action'],
+        },
+        action: async args => JSON.stringify({
+            ok: true,
+            ...(await api('/together/control', {
+                method: 'POST',
+                body: { command: args.action },
+            })),
+        }),
+        shouldRegister,
+    });
+    ToolManager.registerFunctionTool({
+        name: 'netease_companion_comment',
+        displayName: '以角色身份评论歌曲',
+        description: '以当前角色人设发布网易云歌曲评论。可由角色生成内容或使用给定内容。',
+        parameters: {
+            type: 'object',
+            properties: {
+                songId: { type: 'string', description: '可选网易云数字歌曲 ID' },
+                content: { type: 'string', description: '可选评论正文，最多 140 字' },
+            },
+        },
+        action: async args => JSON.stringify(await toolCommentSong(args)),
+        shouldRegister,
+    });
+    ToolManager.registerFunctionTool({
+        name: 'netease_companion_state',
+        displayName: '读取网易云播放状态',
+        description: '读取酒馆播放器当前歌曲、播放状态、队列长度和一起听房间状态。',
+        parameters: { type: 'object', properties: {} },
+        action: async () => JSON.stringify(await toolGetMusicState()),
+        shouldRegister,
+    });
 }
 
 async function refreshTogetherState() {
@@ -1037,12 +1400,12 @@ function parseJsonReply(text) {
     }
 }
 
-async function quiet(prompt) {
+async function quiet(prompt, { candidateGuard = true } = {}) {
     if (typeof generateQuietPrompt !== 'function') {
         throw new Error('当前 SillyTavern 不支持后台静默生成');
     }
     const context = getContext();
-    const prepared = substituteParams(`${prompt}\n\n${CANDIDATE_GUARD}`);
+    const prepared = substituteParams(candidateGuard ? `${prompt}\n\n${CANDIDATE_GUARD}` : prompt);
     const result = await generateQuietPrompt({
         quietPrompt: prepared,
         quietName: context.name2 || 'char',
@@ -1327,6 +1690,30 @@ function injectStyles() {
             font-weight: 650;
             opacity: .86;
         }
+        #netease-music-companion-native .nmcnative-toggle-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 6px;
+            margin-bottom: 10px;
+        }
+        #netease-music-companion-native .nmcnative-toggle {
+            display: flex;
+            align-items: center;
+            gap: 7px;
+            padding: 7px 8px;
+            border: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor) 58%, transparent);
+            border-radius: 8px;
+            font-size: .8rem;
+            background: color-mix(in srgb, var(--SmartThemeBlurTintColor) 82%, transparent);
+        }
+        #netease-music-companion-native .nmcnative-toggle-wide {
+            grid-column: 1 / -1;
+        }
+        #netease-music-companion-native input[type="checkbox"] {
+            width: auto;
+            margin: 0;
+            flex: 0 0 auto;
+        }
         #netease-music-companion-native .nmcnative-tabs {
             position: sticky;
             top: 0;
@@ -1585,7 +1972,8 @@ function injectStyles() {
         }
         @media (max-width: 700px) {
             #netease-music-companion-native .nmcnative-grid,
-            #netease-music-companion-native .nmcnative-actions {
+            #netease-music-companion-native .nmcnative-actions,
+            #netease-music-companion-native .nmcnative-toggle-grid {
                 grid-template-columns: 1fr;
             }
             #netease-music-companion-native .nmcnative-tabs {
@@ -1651,6 +2039,12 @@ function panelHtml() {
 
             <section class="nmcnative-section" data-nmcnative-panel="player" data-active="true">
                 <p class="nmcnative-section-title">酒馆播放器</p>
+                <div class="nmcnative-toggle-grid">
+                    <label class="nmcnative-toggle"><input id="nmcnativeContinuousPlayback" type="checkbox"> 连续播放</label>
+                    <label class="nmcnative-toggle"><input id="nmcnativeCharacterAutoSelect" type="checkbox"> 角色自动选下一首</label>
+                    <label class="nmcnative-toggle nmcnative-toggle-wide"><input id="nmcnativeConversationTools" type="checkbox"> 允许角色在对话中调用网易云工具</label>
+                </div>
+                <p class="nmcnative-note">对话工具还需要在 SillyTavern 的“函数调用 / Function Calling”设置中启用。</p>
                 <p class="nmcnative-subsection-title">从歌单播放</p>
                 <div class="nmcnative-field">
                     <label for="nmcnativePlayerPlaylist">选择歌单</label>
@@ -1677,6 +2071,8 @@ function panelHtml() {
                 <div class="nmcnative-actions">
                     <button id="nmcnativePlayerSearch" type="button">搜索</button>
                     <button id="nmcnativePlayTogetherSong" type="button">播放一起听当前歌曲</button>
+                    <button id="nmcnativePlayerPrevious" type="button">上一首</button>
+                    <button id="nmcnativePlayerNext" type="button">下一首</button>
                 </div>
                 <div class="nmcnative-field">
                     <label for="nmcnativePlayerSearchResults">搜索结果</label>
@@ -1684,7 +2080,7 @@ function panelHtml() {
                         <option value="">— 先搜索歌曲 —</option>
                     </select>
                 </div>
-                <button id="nmcnativePlaySelectedSong" class="nmcnative-wide-button" type="button">播放选中歌曲</button>
+                <button id="nmcnativePlaySelectedSong" class="nmcnative-wide-button" type="button">播放搜索结果</button>
                 <p id="nmcnativePlayerSong" class="nmcnative-status-line">尚未载入歌曲</p>
                 <audio id="nmcnativePlayerAudio" controls preload="metadata"></audio>
                 <div id="nmcnativePlayerLyrics" class="nmcnative-lyrics">
@@ -1692,12 +2088,9 @@ function panelHtml() {
                 </div>
                 <div class="nmcnative-actions">
                     <button id="nmcnativeLoadSongComments" type="button">读取歌曲评论</button>
-                    <button id="nmcnativeSendSongComment" type="button">发布评论</button>
+                    <button id="nmcnativeCharacterSongComment" type="button">让角色评论这首歌</button>
                 </div>
-                <div class="nmcnative-field">
-                    <label for="nmcnativeSongCommentInput">歌曲评论</label>
-                    <textarea id="nmcnativeSongCommentInput" maxlength="140" placeholder="写一条不超过 140 字的评论"></textarea>
-                </div>
+                <p id="nmcnativeGeneratedComment" class="nmcnative-status-line"></p>
                 <div id="nmcnativeSongComments" class="nmcnative-comments">
                     <p class="nmcnative-comment-empty">载入歌曲后可读取评论</p>
                 </div>
@@ -2004,8 +2397,38 @@ function bindEvents() {
     element('nmcnativePlayTogetherSong').addEventListener('click', () => {
         void withBusy('正在读取一起听歌曲...', playCurrentTogetherSong);
     });
+    element('nmcnativePlayerPrevious').addEventListener('click', () => {
+        void withBusy('正在切换上一首...', playPreviousPlayerSong);
+    });
+    element('nmcnativePlayerNext').addEventListener('click', () => {
+        void withBusy('角色正在选择下一首...', () => playNextPlayerSong());
+    });
+    element('nmcnativeContinuousPlayback').addEventListener('change', event => {
+        extension_settings[EXTENSION_KEY].continuousPlayback = event.target.checked;
+        saveSettingsDebounced();
+    });
+    element('nmcnativeCharacterAutoSelect').addEventListener('change', event => {
+        extension_settings[EXTENSION_KEY].characterAutoSelect = event.target.checked;
+        saveSettingsDebounced();
+    });
+    element('nmcnativeConversationTools').addEventListener('change', event => {
+        extension_settings[EXTENSION_KEY].conversationTools = event.target.checked;
+        saveSettingsDebounced();
+        syncConversationTools();
+        setMessage(
+            event.target.checked
+                ? '已注册网易云对话工具。还需在 SillyTavern 函数调用设置中启用 Function Calling。'
+                : '已关闭网易云对话工具。',
+            'info',
+        );
+    });
     element('nmcnativePlayerAudio').addEventListener('timeupdate', syncPlayerLyrics);
     element('nmcnativePlayerAudio').addEventListener('seeked', syncPlayerLyrics);
+    element('nmcnativePlayerAudio').addEventListener('ended', () => {
+        void playNextPlayerSong({ automatic: true }).catch(error => {
+            setMessage(error?.message || '自动播放下一首失败', 'error');
+        });
+    });
     element('nmcnativePlayerAudio').addEventListener('error', () => {
         if (element('nmcnativePlayerAudio')?.src) {
             setMessage('音频加载失败。歌曲可能需要会员、已下架或当前账号无权播放。', 'error');
@@ -2023,8 +2446,8 @@ function bindEvents() {
     element('nmcnativeLoadSongComments').addEventListener('click', () => {
         void withBusy('正在读取评论...', loadSongComments);
     });
-    element('nmcnativeSendSongComment').addEventListener('click', () => {
-        void withBusy('正在发布评论...', sendSongComment);
+    element('nmcnativeCharacterSongComment').addEventListener('click', () => {
+        void withBusy('角色正在写评论...', characterCommentOnSong);
     });
     element('nmcnativeRefreshRoomPlaylist').addEventListener('click', () => {
         void withBusy('正在读取一起听房间歌单...', refreshRoomPlaylist);
@@ -2212,8 +2635,12 @@ async function initializePanel() {
     container.insertAdjacentHTML('beforeend', panelHtml());
     element('nmcnativeBackendUrl').value = extension_settings[EXTENSION_KEY].backendUrl;
     element('nmcnativeTogetherMode').value = extension_settings[EXTENSION_KEY].togetherCreationMode;
+    element('nmcnativeContinuousPlayback').checked = extension_settings[EXTENSION_KEY].continuousPlayback;
+    element('nmcnativeCharacterAutoSelect').checked = extension_settings[EXTENSION_KEY].characterAutoSelect;
+    element('nmcnativeConversationTools').checked = extension_settings[EXTENSION_KEY].conversationTools;
     activateTab(extension_settings[EXTENSION_KEY].activeTab, { persist: false });
     bindEvents();
+    syncConversationTools();
     resetPlaylistControls();
     renderTogetherVisibility();
     try {
@@ -2231,6 +2658,10 @@ async function initializePanel() {
     } catch {
         setMessage('插件后端不可用。请确认 SillyTavern 已启用服务端插件并重启。', 'error');
     }
+}
+
+export function exit() {
+    unregisterConversationTools();
 }
 
 jQuery(async () => {

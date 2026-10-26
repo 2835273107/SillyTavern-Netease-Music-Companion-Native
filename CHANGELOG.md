@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.4.0
+
+- Changed song comments to be generated and published in the character's voice.
+- Added continuous queue playback and automatic next-song advancement.
+- Added optional character-driven next-song selection.
+- Added an opt-in SillyTavern function-tool toggle with tools for search,
+  playback, room control, room additions, comments and state queries.
+- Added manual previous/next controls and removed the manual comment editor.
+
 ## 1.3.0
 
 - Added account playlist selection and track loading to the in-SillyTavern

@@ -1377,6 +1377,32 @@ export async function init(router) {
         Readable.fromWeb(upstream.body).pipe(response);
     }));
 
+    router.get('/song-info/:songId', wrapRoute(async (request, response) => {
+        const songId = cleanText(request.params.songId, 80);
+        if (!/^\d{1,20}$/.test(songId)) {
+            throw new PublicError('songId 必须是数字歌曲 ID');
+        }
+        const cookie = activeCookieOrThrow();
+        const { body } = await requestNetease('/song/detail', {
+            params: { ids: songId },
+            cookie,
+        });
+        const raw = (upstreamData(body)?.songs || body?.songs || [])[0];
+        if (!raw) {
+            throw new PublicError('未找到歌曲信息', 404);
+        }
+        response.json({
+            id: String(raw.id || songId),
+            name: cleanText(raw.name, 200),
+            artist: (raw.ar || raw.artists || [])
+                .map(item => item.name)
+                .filter(Boolean)
+                .join(', '),
+            album: cleanText(raw.al?.name || raw.album?.name, 200),
+            duration: Number(raw.dt || raw.duration) || 0,
+        });
+    }));
+
     router.get('/song-comments/:songId', wrapRoute(async (request, response) => {
         const songId = cleanText(request.params.songId, 80);
         const offset = Math.max(0, Number(request.query.offset) || 0);
