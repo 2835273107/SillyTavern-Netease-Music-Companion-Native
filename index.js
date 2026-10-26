@@ -8,12 +8,14 @@ import { extension_settings } from '../../../extensions.js';
 import { getContext } from '../../../st-context.js';
 import { ToolManager } from '../../../../scripts/tool-calling.js';
 import { loadWorldInfo, world_info } from '../../../../scripts/world-info.js';
+import { getPresetManager } from '../../../../scripts/preset-manager.js';
 
 const EXTENSION_KEY = 'neteaseMusicCompanionNative';
 const DEFAULT_BACKEND = '/api/plugins/netease-music-native';
 const CANDIDATE_GUARD = '候选歌曲只能来自本次搜索接口返回的结果。禁止读取、引用或调用任何接口获取当前歌单中已有的歌曲作为候选。若搜索结果中没有符合角色设定的歌，返回空 selected 数组，不要从歌单中取歌补充。';
-const WORLDBOOK_CONTEXT_LIMIT = 6000;
-const WORLDBOOK_CACHE_MS = 15000;
+const TOGETHER_REPLY_CHAR_LIMIT = 60;
+const SPEAK_SONG_CHAR_LIMIT = 80;
+const SONG_COMMENT_CHAR_LIMIT = 120;
 
 const state = {
     accounts: [],
@@ -49,7 +51,6 @@ const state = {
     generatedTogetherReplies: [],
     characterNameListeners: [],
     panelObserver: null,
-    worldbookCache: null,
 };
 
 function initializeSettings() {
@@ -1246,6 +1247,14 @@ function activeUserName() {
     return String(context.name1 || 'user').trim() || 'user';
 }
 
+function activePresetName() {
+    try {
+        return String(getPresetManager()?.getSelectedPresetName?.() || '').trim();
+    } catch {
+        return '';
+    }
+}
+
 function applyCharacterNameCopy(root = element('netease-music-companion-native')) {
     if (!root) {
         return;
@@ -1497,7 +1506,27 @@ function parseCharacterMessages(reply) {
             .trim())
         .filter(Boolean)
         .slice(0, 3)
-        .map(value => value.slice(0, 300));
+        .map(value => value.slice(0, TOGETHER_REPLY_CHAR_LIMIT));
+}
+
+async function sendCharacterPrivateMessage(message, contactId) {
+    const content = String(message || '').trim().slice(0, 500);
+    if (!content) {
+        throw new Error('没有可发送的私信内容');
+    }
+    await api('/together/send-message', {
+        method: 'POST',
+        body: { message: content, userId: String(contactId) },
+    });
+    state.messageHistory.push({
+        id: `local-${Date.now()}-${state.messageHistory.length}`,
+        sender: 'character',
+        senderName: activeCharacterName(),
+        text: content,
+        time: Date.now(),
+    });
+    renderTogetherMessageHistory();
+    return content;
 }
 
 async function generateTogetherReply() {
@@ -1524,10 +1553,10 @@ async function generateTogetherReply() {
         '聊天记录中由当前网易云账号发出的消息都代表 {{char}}，不是 {{user}}。',
         songContext,
         `聊天记录：\n${conversation}`,
-        '请以 {{char}} 的身份，根据这段聊天接续回复 1 到 3 条连续的短消息。每条消息要像真实私信，可分开表达情绪、回应和补充，不要重复，不要添加角色名前缀或动作说明。',
-        '只输出严格 JSON：{"messages":["第一条","第二条"]}。每条不超过 120 字。',
+        '请以 {{char}} 的身份，根据这段聊天接续回复 1 到 3 条连续的短句。每条都像真实私信，可分别表达情绪、回应和补充，不要重复，不要添加角色名前缀或动作说明。',
+        `只输出严格 JSON：{"messages":["第一条","第二条"]}。每条不超过 ${TOGETHER_REPLY_CHAR_LIMIT} 个中文字符。`,
     ].join('\n\n');
-    const reply = await quiet(prompt, { candidateGuard: false });
+    const reply = await quiet(prompt, { candidateGuard: false, responseLength: 300 });
     const messages = parseCharacterMessages(reply);
     if (!messages.length) {
         throw new Error(`${activeCharacterName()} 没有生成可发送的回复`);
@@ -1539,21 +1568,10 @@ async function generateTogetherReply() {
     const combinedMessage = messages.join('\n\n').slice(0, 500);
     setConnectionState(`${characterName} 正在合并为一条私信发送...`, 'loading');
     try {
-        await api('/together/send-message', {
-            method: 'POST',
-            body: { message: combinedMessage, userId: String(contact.id) },
-        });
+        await sendCharacterPrivateMessage(combinedMessage, contact.id);
         for (const reply of state.generatedTogetherReplies) {
             reply.status = 'merged';
         }
-        state.messageHistory.push({
-            id: `local-${Date.now()}`,
-            sender: 'character',
-            senderName: characterName,
-            text: combinedMessage,
-            time: Date.now(),
-        });
-        renderTogetherMessageHistory();
         renderTogetherReplyLog();
         setMessage(
             `${characterName} 已将 ${messages.length} 段回复合并为一条私信发送。`,
@@ -1573,6 +1591,55 @@ async function generateTogetherReply() {
         setConnectionState(`${characterName} 私信发送失败`, 'warning');
     }
     return { messages, combinedMessage };
+}
+
+async function speakCurrentSongToUser() {
+    if (!state.currentSong && !state.playerSong) {
+        await pollTogetherSongOnce();
+    }
+    const song = state.currentSong || state.playerSong;
+    if (!song?.songName && !song?.name) {
+        throw new Error('请先播放歌曲或刷新一起听当前歌曲');
+    }
+    let contact = selectedMessageContact();
+    if (!contact) {
+        await refreshTogetherMessageContacts();
+        contact = selectedMessageContact();
+    }
+    if (!contact) {
+        throw new Error('请先读取并选择一个网易云私信联系人');
+    }
+    const songName = song.songName || song.name || '未知歌曲';
+    const recentConversation = state.messageHistory
+        .slice(-8)
+        .map(message => {
+            const speaker = message.sender === 'contact' ? '{{user}}' : '{{char}}';
+            return `${speaker}：${String(message.text || '').replace(/\s+/g, ' ').slice(0, 180)}`;
+        })
+        .join('\n');
+    const reply = await quiet([
+        `你正在和 {{user}} 一起听《${songName}》${song.artist ? ` - ${song.artist}` : ''}。`,
+        recentConversation ? `最近的网易云私信：\n${recentConversation}` : '',
+        `请以 {{char}} 的身份，写一句想直接私信给 {{user}} 的听歌短句。只写一句，不超过 ${SPEAK_SONG_CHAR_LIMIT} 个中文字符，不要加引号、角色名前缀或解释。`,
+    ].filter(Boolean).join('\n\n'), {
+        candidateGuard: false,
+        responseLength: 160,
+    });
+    const content = String(reply)
+        .replace(/^[“”"'「」]+|[“”"'「」]+$/g, '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, SPEAK_SONG_CHAR_LIMIT);
+    if (!content) {
+        throw new Error(`${activeCharacterName()} 没有生成可发送的听歌短句`);
+    }
+    await sendCharacterPrivateMessage(content, contact.id);
+    state.generatedTogetherReplies = [{ text: content, status: 'sent' }];
+    renderTogetherReplyLog();
+    setText('nmcnativeCharComment', `${activeCharacterName()} 已私信：${content}`);
+    setMessage(`${activeCharacterName()} 已将听歌短句私信给 ${activeUserName()}。`, 'success');
+    setConnectionState(`${activeCharacterName()} 已私信听歌短句`, 'success');
+    return content;
 }
 
 function renderRoomPlaylist(data) {
@@ -1705,7 +1772,10 @@ async function loadSongComments() {
 }
 
 async function postSongComment(songId, content) {
-    const normalizedContent = String(content || '').trim().slice(0, 140);
+    const normalizedContent = String(content || '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, SONG_COMMENT_CHAR_LIMIT);
     if (!normalizedContent) {
         throw new Error('评论内容不能为空');
     }
@@ -1729,8 +1799,8 @@ async function characterCommentOnSong() {
         throw new Error('缺少歌曲信息');
     }
     const generated = await quiet(
-        `你是 {{char}}。你正在听《${song.name || song.songName || ''}》${song.artist ? ` - ${song.artist}` : ''}。请完全以角色本人的人格、经历和说话方式，写一条发布在网易云歌曲评论区的短评，不超过 140 个中文字符，不要自称 AI，不要解释，不要加引号，只输出评论正文。`,
-        { candidateGuard: false },
+        `你是 {{char}}。你正在听《${song.name || song.songName || ''}》${song.artist ? ` - ${song.artist}` : ''}。请完全以角色本人的人格、经历和说话方式，写一段发布在网易云歌曲评论区的短评论，不超过 ${SONG_COMMENT_CHAR_LIMIT} 个中文字符，不要自称 AI，不要解释，不要加引号，只输出评论正文。`,
+        { candidateGuard: false, responseLength: 220 },
     );
     const content = await postSongComment(songId, generated);
     setText('nmcnativeGeneratedComment', content);
@@ -1785,8 +1855,8 @@ async function toolCommentSong(args = {}) {
     }
     const content = String(args.content || '').trim()
         || await quiet(
-            `你是 {{char}}。请以角色本人的口吻，为《${song.name || song.songName || ''}》${song.artist ? ` - ${song.artist}` : ''}写一条网易云歌曲短评，不超过 140 字。不要自称 AI，不要解释，只输出评论正文。`,
-            { candidateGuard: false },
+            `你是 {{char}}。请以角色本人的口吻，为《${song.name || song.songName || ''}》${song.artist ? ` - ${song.artist}` : ''}写一段网易云歌曲短评论，不超过 ${SONG_COMMENT_CHAR_LIMIT} 个中文字符。不要自称 AI，不要解释，只输出评论正文。`,
+            { candidateGuard: false, responseLength: 220 },
         );
     const posted = await postSongComment(song.id, content);
     setText('nmcnativeGeneratedComment', posted);
@@ -1929,7 +1999,7 @@ function syncConversationTools() {
             type: 'object',
             properties: {
                 songId: { type: 'string', description: '可选网易云数字歌曲 ID' },
-                content: { type: 'string', description: '可选评论正文，最多 140 字' },
+                content: { type: 'string', description: '可选评论正文，最多 120 字' },
             },
         },
         action: async args => JSON.stringify(await toolCommentSong(args)),
@@ -2082,19 +2152,8 @@ async function characterWorldbookContext() {
         return '';
     }
 
-    const cacheKey = [
-        String(context.characterId ?? ''),
-        String(character?.avatar || ''),
-        names.join('|'),
-    ].join('::');
-    if (state.worldbookCache?.key === cacheKey
-        && Date.now() - state.worldbookCache.createdAt < WORLDBOOK_CACHE_MS) {
-        return state.worldbookCache.value;
-    }
-
     const sections = [];
     const seen = new Set();
-    let used = 0;
     for (const name of names) {
         const data = await loadWorldInfo(name).catch(() => null);
         for (const entry of normalizedWorldbookEntries(data)) {
@@ -2106,18 +2165,9 @@ async function characterWorldbookContext() {
             if (!content || seen.has(dedupeKey)) {
                 continue;
             }
-            const remaining = WORLDBOOK_CONTEXT_LIMIT - used;
-            if (remaining < 80) {
-                break;
-            }
             const heading = `【世界书：${name}${entry.comment ? ` / ${String(entry.comment).slice(0, 60)}` : ''}】`;
-            const availableContent = Math.max(0, remaining - heading.length - 2);
-            const body = content.length > availableContent
-                ? `${content.slice(0, Math.max(0, availableContent - 1)).trimEnd()}…`
-                : content;
             seen.add(dedupeKey);
-            sections.push(`${heading}\n${body}`);
-            used += heading.length + body.length + 2;
+            sections.push(`${heading}\n${content}`);
         }
     }
 
@@ -2129,11 +2179,14 @@ async function characterWorldbookContext() {
             '</角色世界书>',
         ].join('\n')
         : '';
-    state.worldbookCache = { key: cacheKey, createdAt: Date.now(), value };
     return value;
 }
 
-async function quiet(prompt, { candidateGuard = true, includeWorldbook = true } = {}) {
+async function quiet(prompt, {
+    candidateGuard = true,
+    includeWorldbook = true,
+    responseLength = null,
+} = {}) {
     if (typeof generateQuietPrompt !== 'function') {
         throw new Error('当前 SillyTavern 不支持后台静默生成');
     }
@@ -2141,12 +2194,20 @@ async function quiet(prompt, { candidateGuard = true, includeWorldbook = true } 
     const worldbook = includeWorldbook
         ? await characterWorldbookContext().catch(() => '')
         : '';
-    const basePrompt = [worldbook, prompt].filter(Boolean).join('\n\n');
+    const presetName = activePresetName();
+    const presetGuard = presetName
+        ? `当前 SillyTavern 预设是“${presetName}”。严格沿用该预设的语言、人称、角色口吻、格式和可用上下文规则，再完成下面的具体任务。`
+        : '严格沿用当前 SillyTavern 预设的语言、人称、角色口吻、格式和可用上下文规则，再完成下面的具体任务。';
+    const basePrompt = [worldbook, presetGuard, prompt].filter(Boolean).join('\n\n');
     const prepared = substituteParams(candidateGuard ? `${basePrompt}\n\n${CANDIDATE_GUARD}` : basePrompt);
-    const result = await generateQuietPrompt({
+    const options = {
         quietPrompt: prepared,
-        quietName: context.name2 || 'char',
-    });
+        quietName: activeCharacterName(),
+    };
+    if (Number.isFinite(responseLength) && responseLength > 0) {
+        options.responseLength = Math.floor(responseLength);
+    }
+    const result = await generateQuietPrompt(options);
     return String(result || '').trim();
 }
 
@@ -3244,7 +3305,7 @@ function panelHtml() {
                         <label class="nmcnative-toggle"><input id="nmcnativeCharacterAutoSelect" type="checkbox"> <span data-nmcnative-char-template="{char} 自动选下一首">角色自动选下一首</span></label>
                         <label class="nmcnative-toggle nmcnative-toggle-wide"><input id="nmcnativeConversationTools" type="checkbox"> <span data-nmcnative-char-template="允许 {char} 在对话中调用网易云工具">允许角色在对话中调用网易云工具</span></label>
                     </div>
-                    <p class="nmcnative-note" data-nmcnative-char-template="{char} 评论、选歌和对话工具会一并读取当前角色绑定的主世界书与附加世界书，内容限制在 6000 字以内。对话工具仍需在 SillyTavern 的 Function Calling 设置中启用。">角色评论、选歌和对话工具会一并读取当前角色绑定的主世界书与附加世界书，内容限制在 6000 字以内。对话工具仍需在 SillyTavern 的 Function Calling 设置中启用。</p>
+                    <p class="nmcnative-note" data-nmcnative-char-template="{char} 的后台生成会沿用当前 SillyTavern 预设，并完整读取绑定的主世界书与附加世界书。对话工具仍需在 SillyTavern 的 Function Calling 设置中启用。">角色的后台生成会沿用当前 SillyTavern 预设，并完整读取绑定的主世界书与附加世界书。对话工具仍需在 SillyTavern 的 Function Calling 设置中启用。</p>
                 </details>
             </section>
 
@@ -3259,7 +3320,7 @@ function panelHtml() {
                 <div class="nmcnative-actions">
                     <button id="nmcnativeCreateRoom" class="nmcnative-primary" type="button">创建房间</button>
                     <button id="nmcnativeToggleSongPolling" type="button">刷新当前歌曲</button>
-                    <button id="nmcnativeSpeakSong" type="button" data-nmcnative-char-template="让 {char} 说说这首歌">让角色说说这首歌</button>
+                    <button id="nmcnativeSpeakSong" type="button" data-nmcnative-char-template="让 {char} 私信说说这首歌">让角色说说这首歌</button>
                     <button id="nmcnativeLeaveRoom" type="button">离开房间</button>
                 </div>
                 <div class="nmcnative-row" style="margin-top:8px">
@@ -3795,16 +3856,7 @@ function bindEvents() {
         }
     });
     element('nmcnativeSpeakSong').addEventListener('click', () => {
-        void withBusy(`${activeCharacterName()} 正在听歌...`, async () => {
-            if (!state.currentSong) {
-                await pollTogetherSongOnce();
-            }
-            if (!state.currentSong?.songName) {
-                throw new Error('请先刷新当前歌曲');
-            }
-            const reply = await quiet(`你是 {{char}}。你正在和我一起听歌，当前播放的是《${state.currentSong.songName}》- ${state.currentSong.artist || '未知歌手'}。请用你的人格和语气，对这首歌说一两句话（不超过 60 字），可以是感受、联想或对我说的悄悄话。只输出这句话，不要解释。`);
-            setText('nmcnativeCharComment', String(reply).trim().slice(0, 120));
-        });
+        void withBusy(`${activeCharacterName()} 正在写听歌短句...`, speakCurrentSongToUser);
     });
     element('nmcnativeLeaveRoom').addEventListener('click', () => {
         void withBusy('正在离开房间...', async () => {

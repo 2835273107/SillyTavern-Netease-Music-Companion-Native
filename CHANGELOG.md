@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.8.0
+
+- Sent the “let the character talk about this song” result directly to the
+  selected NetEase private-chat contact.
+- Followed the active SillyTavern preset explicitly and removed the 6000
+  character cap from character-bound world books.
+- Limited private-chat reply segments to 60 Chinese characters, standalone
+  song messages to 80 characters and song comments to one 120-character
+  paragraph.
+- Added generation token caps alongside hard post-generation character limits.
+
 ## 1.7.4
 
 - Replaced unreliable back-to-back multi-message delivery with one NetEase
