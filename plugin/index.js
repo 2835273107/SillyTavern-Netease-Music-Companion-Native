@@ -322,6 +322,85 @@ function extractProfile(body) {
     };
 }
 
+function privateMessageText(value, depth = 0) {
+    if (depth > 4 || value === undefined || value === null) {
+        return '';
+    }
+    if (typeof value === 'string') {
+        const trimmed = value.trim();
+        if (!trimmed) {
+            return '';
+        }
+        if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+            try {
+                return privateMessageText(JSON.parse(trimmed), depth + 1);
+            } catch {
+                return cleanText(trimmed, 1000);
+            }
+        }
+        return cleanText(trimmed, 1000);
+    }
+    if (typeof value !== 'object') {
+        return cleanText(value, 1000);
+    }
+    for (const key of ['msg', 'pushMsg', 'content', 'title']) {
+        const nested = privateMessageText(value[key], depth + 1);
+        if (nested) {
+            return nested;
+        }
+    }
+    return '';
+}
+
+function privateProfile(user) {
+    return {
+        userId: cleanText(user?.userId || user?.id, 80),
+        name: cleanText(user?.remarkName || user?.nickname || user?.name, 100) || '网易云用户',
+    };
+}
+
+function normalizePrivateContact(item, selfId) {
+    const wrapper = item?.user || {};
+    const from = privateProfile(item?.fromUser);
+    const to = privateProfile(item?.toUser);
+    const contact = from.userId && from.userId !== selfId ? from : to;
+    const lastMessage = privateMessageText(item?.lastMsg || wrapper.lastMsg);
+    return {
+        id: contact.userId,
+        name: contact.name,
+        lastMessage,
+        lastMessageAt: Number(item?.lastMsgTime || wrapper.lastMsgTime) || 0,
+        unread: Number(wrapper.newMsgCount || item?.newMsgCount) || 0,
+        lastFromSelf: cleanText(wrapper.fromUserId, 80) === selfId,
+    };
+}
+
+function normalizePrivateHistory(body, selfId, fallbackContact = null) {
+    const data = upstreamData(body) || {};
+    const rawMessages = Array.isArray(data.msgs) ? data.msgs : [];
+    const messages = rawMessages.map(item => {
+        const from = privateProfile(item?.fromUser);
+        const to = privateProfile(item?.toUser);
+        const fromSelf = from.userId === selfId;
+        const senderName = fromSelf
+            ? '你'
+            : from.name || fallbackContact?.name || '网易云用户';
+        return {
+            id: cleanText(item?.id, 80),
+            sender: fromSelf ? 'user' : 'contact',
+            senderName,
+            text: privateMessageText(item?.msg) || '暂不支持预览这条消息，请在网易云客户端查看。',
+            time: Number(item?.time) || 0,
+            recipientId: to.userId,
+        };
+    }).filter(message => message.id || message.text);
+    messages.sort((left, right) => left.time - right.time);
+    return {
+        messages,
+        hasMore: data.more === true,
+    };
+}
+
 function findCookieValue(cookieText, name) {
     const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const match = String(cookieText || '').match(new RegExp(`(?:^|[;,\\s])${escaped}=([^;,\\s]+)`, 'i'));
@@ -1846,6 +1925,71 @@ export async function init(router) {
             ok: true,
             sentTo: settings.user_netease_id,
             inviteUrl: room.inviteUrl,
+        });
+    }));
+
+    router.get('/together/message-contacts', wrapRoute(async (_request, response) => {
+        if (rejectTogetherDisabled(response)) {
+            return;
+        }
+        const { account } = getActiveAccount();
+        const cookie = activeCookieOrThrow();
+        const { body } = await requestNetease('/msg/private', {
+            method: 'POST',
+            params: { limit: 50, offset: 0 },
+            cookie,
+        });
+        const data = upstreamData(body) || {};
+        const selfId = cleanText(account.userId, 80);
+        const rawContacts = Array.isArray(data.msgs) ? data.msgs : [];
+        const unique = new Map();
+        for (const item of rawContacts) {
+            const contact = normalizePrivateContact(item, selfId);
+            if (!/^\d{1,20}$/.test(contact.id)) {
+                continue;
+            }
+            const previous = unique.get(contact.id);
+            if (!previous || contact.lastMessageAt > previous.lastMessageAt) {
+                unique.set(contact.id, contact);
+            }
+        }
+        const contacts = [...unique.values()]
+            .sort((left, right) => right.lastMessageAt - left.lastMessageAt);
+        response.json({
+            contacts,
+            preferredUserId: /^\d{1,20}$/.test(settings.user_netease_id)
+                ? settings.user_netease_id
+                : '',
+        });
+    }));
+
+    router.get('/together/message-history/:userId', wrapRoute(async (request, response) => {
+        if (rejectTogetherDisabled(response)) {
+            return;
+        }
+        const { account } = getActiveAccount();
+        const cookie = activeCookieOrThrow();
+        const userId = cleanText(request.params.userId, 80);
+        if (!/^\d{1,20}$/.test(userId)) {
+            throw new PublicError('私信联系人 ID 无效');
+        }
+        const limit = Math.min(50, Math.max(1, Number(request.query.limit) || 30));
+        const { body } = await requestNetease('/msg/private/history', {
+            method: 'POST',
+            params: { uid: userId, limit },
+            cookie,
+        });
+        const selfId = cleanText(account.userId, 80);
+        const data = upstreamData(body) || {};
+        const rawMessages = Array.isArray(data.msgs) ? data.msgs : [];
+        const contactProfile = rawMessages
+            .flatMap(item => [item?.fromUser, item?.toUser])
+            .map(privateProfile)
+            .find(profile => profile.userId && profile.userId !== selfId);
+        response.json({
+            userId,
+            contact: contactProfile || null,
+            ...normalizePrivateHistory(body, selfId, contactProfile),
         });
     }));
 

@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.7.0
+
+- Added NetEase private-message contact and conversation-history reading to
+  the Listen Together character reply module.
+- Decoded nested NetEase message payloads into readable text and displayed
+  user/contact chat bubbles.
+- Character replies now use the selected NetEase conversation, current song,
+  world books and persona.
+- Character replies can be generated and sent as one to three consecutive
+  private messages.
+
 ## 1.6.1
 
 - Replaced the manual Listen Together message form with a character-generated

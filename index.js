@@ -43,6 +43,9 @@ const state = {
     roomPlaylist: [],
     roomPlaylistCurrentId: '',
     comments: [],
+    messageContacts: [],
+    selectedMessageContactId: '',
+    messageHistory: [],
     panelObserver: null,
     worldbookCache: null,
 };
@@ -183,6 +186,7 @@ function setBusy(isBusy, label = '处理中...') {
         renderAccounts();
         renderTogetherVisibility();
         updatePlaylistControls();
+        updateMessageReplyAvailability();
     }
 }
 
@@ -618,6 +622,18 @@ function resetTogetherPanel() {
     }
 }
 
+function resetTogetherMessageState() {
+    state.messageContacts = [];
+    state.selectedMessageContactId = '';
+    state.messageHistory = [];
+    renderMessageContacts();
+    renderTogetherMessageHistory();
+    setText('nmcnativeTogetherMessageState', '尚未读取网易云私信');
+    updateMessageReplyAvailability();
+    const log = element('nmcnativeTogetherMessageLog');
+    log?.replaceChildren();
+}
+
 function renderTogetherVisibility() {
     const section = element('nmcnativeTogetherSection');
     if (!section) {
@@ -637,10 +653,12 @@ function renderTogetherVisibility() {
         if (copy && !copy.dataset.url) {
             copy.disabled = true;
         }
+        updateMessageReplyAvailability();
         return;
     }
     if (!state.togetherEnabled) {
         resetTogetherPanel();
+        resetTogetherMessageState();
     }
 }
 
@@ -1199,55 +1217,261 @@ async function controlPlayer(action) {
     throw new Error('播放控制仅支持 play、pause、next、previous');
 }
 
-function recentTogetherConversation(chat) {
-    const rows = (Array.isArray(chat) ? chat : [])
-        .filter(message => message && String(message.mes || '').trim())
-        .slice(-10)
-        .map(message => ({
-            speaker: message.is_user ? '{{user}}' : '{{char}}',
-            text: String(message.mes || '').replace(/\s+/g, ' ').trim().slice(0, 260),
-        }));
-    return rows.map(row => `${row.speaker}：${row.text}`).join('\n');
+function activeCharacterName() {
+    const context = getContext();
+    return context.characters?.[context.characterId]?.name
+        || (context.name2 && context.name2 !== 'SillyTavern System' ? context.name2 : '角色');
+}
+
+function formatPrivateMessageTime(value) {
+    const timestamp = Number(value) || 0;
+    if (!timestamp) {
+        return '';
+    }
+    try {
+        return new Intl.DateTimeFormat('zh-CN', {
+            month: 'numeric',
+            day: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+        }).format(new Date(timestamp));
+    } catch {
+        return '';
+    }
+}
+
+function selectedMessageContact() {
+    return state.messageContacts.find(
+        contact => String(contact.id) === String(state.selectedMessageContactId),
+    ) || null;
+}
+
+function updateMessageReplyAvailability() {
+    const button = element('nmcnativeGenerateTogetherReply');
+    if (button) {
+        button.disabled = state.busy
+            || !state.selectedMessageContactId
+            || state.messageHistory.length === 0;
+    }
+}
+
+function renderMessageContacts() {
+    const list = element('nmcnativeTogetherMessageContacts');
+    if (!list) {
+        return;
+    }
+    list.replaceChildren();
+    if (!state.messageContacts.length) {
+        const empty = document.createElement('p');
+        empty.className = 'nmcnative-list-empty';
+        empty.textContent = '没有读取到网易云私信联系人';
+        list.append(empty);
+        updateMessageReplyAvailability();
+        return;
+    }
+    for (const contact of state.messageContacts) {
+        const row = document.createElement('button');
+        row.type = 'button';
+        row.className = 'nmcnative-contact-choice';
+        row.dataset.contactId = String(contact.id);
+        row.setAttribute('role', 'option');
+        const selected = String(contact.id) === String(state.selectedMessageContactId);
+        row.classList.toggle('selected', selected);
+        row.setAttribute('aria-selected', String(selected));
+
+        const avatar = document.createElement('span');
+        avatar.className = 'nmcnative-contact-avatar';
+        avatar.textContent = String(contact.name || '云').slice(0, 1);
+        const body = document.createElement('span');
+        body.className = 'nmcnative-contact-body';
+        const name = document.createElement('span');
+        name.className = 'nmcnative-contact-name';
+        name.textContent = contact.name || '网易云用户';
+        const preview = document.createElement('span');
+        preview.className = 'nmcnative-contact-preview';
+        preview.textContent = `${contact.lastFromSelf ? '你：' : ''}${contact.lastMessage || '暂无文字消息'}`;
+        body.append(name, preview);
+        const meta = document.createElement('span');
+        meta.className = 'nmcnative-contact-meta';
+        meta.textContent = contact.unread > 0
+            ? `${contact.unread} 条未读`
+            : formatPrivateMessageTime(contact.lastMessageAt);
+        row.append(avatar, body, meta);
+        row.addEventListener('click', () => {
+            state.selectedMessageContactId = String(contact.id);
+            renderMessageContacts();
+            void withBusy('正在读取网易云聊天记录...', () => loadTogetherMessageHistory(contact.id));
+        });
+        list.append(row);
+    }
+    updateMessageReplyAvailability();
+}
+
+function renderTogetherMessageHistory() {
+    const container = element('nmcnativeTogetherMessageHistory');
+    if (!container) {
+        return;
+    }
+    container.replaceChildren();
+    if (!state.messageHistory.length) {
+        const empty = document.createElement('p');
+        empty.className = 'nmcnative-list-empty';
+        empty.textContent = state.selectedMessageContactId
+            ? '这段私信还没有可显示的文字消息'
+            : '选择一个联系人后显示聊天记录';
+        container.append(empty);
+        updateMessageReplyAvailability();
+        return;
+    }
+    const contactName = selectedMessageContact()?.name || '对方';
+    for (const message of state.messageHistory) {
+        const bubble = document.createElement('div');
+        const side = message.sender === 'contact' ? 'contact' : message.sender === 'character' ? 'character' : 'user';
+        bubble.className = `nmcnative-chat-bubble nmcnative-chat-${side}`;
+        const meta = document.createElement('span');
+        meta.className = 'nmcnative-chat-meta';
+        meta.textContent = [
+            message.sender === 'user' ? '你' : message.sender === 'character' ? activeCharacterName() : contactName,
+            formatPrivateMessageTime(message.time),
+        ].filter(Boolean).join(' · ');
+        const text = document.createElement('span');
+        text.className = 'nmcnative-chat-text';
+        text.textContent = message.text || '';
+        bubble.append(meta, text);
+        container.append(bubble);
+    }
+    container.scrollTop = container.scrollHeight;
+    updateMessageReplyAvailability();
+}
+
+async function loadTogetherMessageHistory(contactId) {
+    const result = await api(`/together/message-history/${encodeURIComponent(contactId)}?limit=30`);
+    state.selectedMessageContactId = String(result.userId || contactId);
+    state.messageHistory = Array.isArray(result.messages) ? result.messages : [];
+    setText(
+        'nmcnativeTogetherMessageState',
+        `${selectedMessageContact()?.name || '联系人'} · ${state.messageHistory.length} 条文字消息`,
+    );
+    renderMessageContacts();
+    renderTogetherMessageHistory();
+    return result;
+}
+
+async function refreshTogetherMessageContacts() {
+    const result = await api('/together/message-contacts');
+    state.messageContacts = Array.isArray(result.contacts) ? result.contacts : [];
+    const selectedStillExists = state.messageContacts.some(
+        contact => String(contact.id) === String(state.selectedMessageContactId),
+    );
+    if (!selectedStillExists) {
+        const preferred = state.messageContacts.find(
+            contact => String(contact.id) === String(result.preferredUserId || ''),
+        );
+        state.selectedMessageContactId = String(
+            preferred?.id || state.messageContacts[0]?.id || '',
+        );
+    }
+    renderMessageContacts();
+    if (state.selectedMessageContactId) {
+        await loadTogetherMessageHistory(state.selectedMessageContactId);
+    } else {
+        state.messageHistory = [];
+        setText('nmcnativeTogetherMessageState', '没有可读取的私信联系人');
+        renderTogetherMessageHistory();
+    }
+    return result;
+}
+
+function parseCharacterMessages(reply) {
+    let values = [];
+    try {
+        const parsed = parseJsonReply(reply);
+        if (Array.isArray(parsed?.messages)) {
+            values = parsed.messages;
+        } else if (typeof parsed?.message === 'string') {
+            values = [parsed.message];
+        }
+    } catch {
+        // Fall back to one message per line below.
+    }
+    if (!values.length) {
+        values = String(reply || '')
+            .split(/\n+/)
+            .map(value => value.replace(/^[-*\d.、\s]+/, ''));
+    }
+    return values
+        .map(value => String(value || '')
+            .replace(/^[“”"'「」]+|[“”"'「」]+$/g, '')
+            .trim())
+        .filter(Boolean)
+        .slice(0, 3)
+        .map(value => value.slice(0, 300));
 }
 
 async function generateTogetherReply() {
-    const context = getContext();
+    const contact = selectedMessageContact();
+    if (!contact) {
+        throw new Error('请先选择一个网易云私信联系人');
+    }
+    if (!state.messageHistory.length) {
+        throw new Error('当前聊天没有可回复的文字消息');
+    }
     const currentSong = state.currentSong || state.playerSong;
     const songContext = currentSong
         ? `当前一起听的歌曲是《${currentSong.songName || currentSong.name || '未知歌曲'}》${currentSong.artist ? ` - ${currentSong.artist}` : ''}。`
-        : '当前还没有读取到正在播放的歌曲。';
-    const conversation = recentTogetherConversation(context.chat);
+        : '当前没有读取到正在播放的歌曲。';
+    const conversation = state.messageHistory
+        .slice(-12)
+        .map(message => {
+            const speaker = message.sender === 'user'
+                ? '{{user}}'
+                : message.sender === 'character'
+                    ? '{{char}}'
+                    : contact.name;
+            return `${speaker}：${String(message.text || '').replace(/\s+/g, ' ').slice(0, 260)}`;
+        })
+        .join('\n');
     const prompt = [
-        '你正在网易云音乐的一起听房间里陪伴 {{user}}。',
+        `你正在阅读 {{user}} 在网易云音乐与“${contact.name}”的私信聊天记录。`,
         songContext,
-        conversation ? `最近的对话：\n${conversation}` : '',
-        '请以 {{char}} 的身份，回复 {{user}} 最近表达的内容。保持角色人格和说话方式，结合正在听的歌，写成一条可以直接发送的网易云文字私信。',
-        '只输出消息正文，不要加引号、角色名前缀、动作说明或解释，不超过 120 字。',
-    ].filter(Boolean).join('\n\n');
-    const reply = String(await quiet(prompt, { candidateGuard: false }))
-        .replace(/^[“”"'「」]+|[“”"'「」]+$/g, '')
-        .trim()
-        .slice(0, 500);
-    if (!reply) {
+        `聊天记录：\n${conversation}`,
+        '请以 {{char}} 的身份，根据这段聊天接续回复 1 到 3 条连续的短消息。每条消息要像真实私信，可分开表达情绪、回应和补充，不要重复，不要添加角色名前缀或动作说明。',
+        '只输出严格 JSON：{"messages":["第一条","第二条"]}。每条不超过 120 字。',
+    ].join('\n\n');
+    const reply = await quiet(prompt, { candidateGuard: false });
+    const messages = parseCharacterMessages(reply);
+    if (!messages.length) {
         throw new Error('角色没有生成可发送的回复');
     }
-    const result = await api('/together/send-message', {
-        method: 'POST',
-        body: { message: reply },
-    });
+
+    const characterName = activeCharacterName();
+    for (const message of messages) {
+        await api('/together/send-message', {
+            method: 'POST',
+            body: { message, userId: String(contact.id) },
+        });
+        state.messageHistory.push({
+            id: `local-${Date.now()}-${state.messageHistory.length}`,
+            sender: 'character',
+            senderName: characterName,
+            text: message,
+            time: Date.now(),
+        });
+    }
+    renderTogetherMessageHistory();
     const log = element('nmcnativeTogetherMessageLog');
     if (log) {
-        const row = document.createElement('p');
-        row.className = 'nmcnative-sent-message';
-        const characterName = context.characters?.[context.characterId]?.name
-            || (context.name2 && context.name2 !== 'SillyTavern System' ? context.name2 : '角色');
-        row.textContent = `${characterName}：${reply}`;
-        log.append(row);
-        log.scrollTop = log.scrollHeight;
+        log.replaceChildren();
+        for (const message of messages) {
+            const row = document.createElement('p');
+            row.className = 'nmcnative-sent-message';
+            row.textContent = `${characterName}：${message}`;
+            log.append(row);
+        }
     }
-    setMessage('角色回复已发送到配置的网易云私信。', 'success');
-    setConnectionState('角色回复已发送', 'success');
-    return result;
+    setMessage(`角色已连续回复 ${messages.length} 条私信。`, 'success');
+    setConnectionState(`角色已回复 ${messages.length} 条`, 'success');
+    return { messages };
 }
 
 function renderRoomPlaylist(data) {
@@ -2005,6 +2229,7 @@ async function switchAccount() {
     closeQrPanel();
     stopTogetherPolling();
     resetTogetherPanel();
+    resetTogetherMessageState();
     const status = await refreshStatus({ silent: true });
     const tasks = [refreshCurrentPlaylist()];
     if (status.loggedIn) {
@@ -2015,6 +2240,7 @@ async function switchAccount() {
     }
     if (status.togetherEnabled) {
         tasks.push(refreshTogetherState());
+        tasks.push(refreshTogetherMessageContacts());
     }
     await Promise.allSettled(tasks);
     setMessage(`已切换到 ${accountName(accountId)}。`, 'success');
@@ -2533,6 +2759,134 @@ function injectStyles() {
             font-size: .8rem;
             opacity: .65;
         }
+        #netease-music-companion-native .nmcnative-chat-toolbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            margin: 7px 0 8px;
+        }
+        #netease-music-companion-native .nmcnative-chat-toolbar .nmcnative-list-summary {
+            margin: 0;
+        }
+        #netease-music-companion-native .nmcnative-chat-toolbar button {
+            min-height: 29px;
+            padding: 4px 8px;
+            font-size: .74rem;
+            white-space: nowrap;
+        }
+        #netease-music-companion-native .nmcnative-contact-list {
+            display: flex;
+            flex-direction: column;
+            gap: 3px;
+            max-height: 166px;
+            overflow-y: auto;
+            margin-bottom: 8px;
+            padding: 4px;
+            border: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor) 34%, transparent);
+            border-radius: 9px;
+            background: color-mix(in srgb, var(--SmartThemeBlurTintColor) 54%, transparent);
+            scrollbar-gutter: stable;
+        }
+        #netease-music-companion-native .nmcnative-contact-choice {
+            display: grid;
+            grid-template-columns: 30px minmax(0, 1fr) auto;
+            align-items: center;
+            gap: 7px;
+            width: 100%;
+            min-height: 42px;
+            padding: 5px 6px;
+            text-align: left;
+            border-color: transparent;
+            background: transparent;
+        }
+        #netease-music-companion-native .nmcnative-contact-choice.selected {
+            border-color: color-mix(in srgb, var(--SmartThemeQuoteColor) 36%, var(--SmartThemeBorderColor));
+            background: color-mix(in srgb, var(--SmartThemeQuoteColor) 14%, transparent);
+        }
+        #netease-music-companion-native .nmcnative-contact-avatar {
+            display: grid;
+            place-items: center;
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            color: color-mix(in srgb, var(--SmartThemeQuoteColor) 82%, var(--SmartThemeBodyColor));
+            background: color-mix(in srgb, var(--SmartThemeQuoteColor) 13%, transparent);
+            font-size: .75rem;
+            font-weight: 750;
+        }
+        #netease-music-companion-native .nmcnative-contact-body {
+            display: flex;
+            min-width: 0;
+            flex-direction: column;
+            gap: 1px;
+        }
+        #netease-music-companion-native .nmcnative-contact-name,
+        #netease-music-companion-native .nmcnative-contact-preview {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        #netease-music-companion-native .nmcnative-contact-name {
+            font-size: .78rem;
+            font-weight: 650;
+        }
+        #netease-music-companion-native .nmcnative-contact-preview {
+            font-size: .7rem;
+            opacity: .56;
+        }
+        #netease-music-companion-native .nmcnative-contact-meta {
+            font-size: .66rem;
+            opacity: .5;
+            white-space: nowrap;
+        }
+        #netease-music-companion-native .nmcnative-chat-history {
+            display: flex;
+            flex-direction: column;
+            gap: 7px;
+            max-height: 320px;
+            min-height: 86px;
+            overflow-y: auto;
+            margin: 8px 0;
+            padding: 9px;
+            border: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor) 34%, transparent);
+            border-radius: 10px;
+            background: color-mix(in srgb, var(--SmartThemeBlurTintColor) 56%, transparent);
+            scrollbar-gutter: stable;
+        }
+        #netease-music-companion-native .nmcnative-chat-bubble {
+            display: flex;
+            max-width: 86%;
+            flex-direction: column;
+            gap: 2px;
+            padding: 7px 9px;
+            border: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor) 36%, transparent);
+            border-radius: 10px;
+            background: color-mix(in srgb, var(--SmartThemeBlurTintColor) 84%, transparent);
+        }
+        #netease-music-companion-native .nmcnative-chat-bubble.nmcnative-chat-user {
+            align-self: flex-end;
+            border-color: color-mix(in srgb, var(--SmartThemeQuoteColor) 30%, var(--SmartThemeBorderColor));
+            background: color-mix(in srgb, var(--SmartThemeQuoteColor) 13%, var(--SmartThemeBlurTintColor));
+        }
+        #netease-music-companion-native .nmcnative-chat-bubble.nmcnative-chat-contact {
+            align-self: flex-start;
+        }
+        #netease-music-companion-native .nmcnative-chat-bubble.nmcnative-chat-character {
+            align-self: flex-end;
+            border-style: dashed;
+            border-color: color-mix(in srgb, var(--SmartThemeQuoteColor) 48%, var(--SmartThemeBorderColor));
+        }
+        #netease-music-companion-native .nmcnative-chat-meta {
+            font-size: .63rem;
+            opacity: .52;
+        }
+        #netease-music-companion-native .nmcnative-chat-text {
+            font-size: .78rem;
+            line-height: 1.45;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+        }
         #netease-music-companion-native .nmcnative-message-log {
             max-height: 130px;
             overflow-y: auto;
@@ -2625,6 +2979,12 @@ function injectStyles() {
             }
             #netease-music-companion-native .nmcnative-now-playing {
                 padding: 9px;
+            }
+            #netease-music-companion-native .nmcnative-contact-list {
+                max-height: 148px;
+            }
+            #netease-music-companion-native .nmcnative-chat-history {
+                max-height: 280px;
             }
         }
     `;
@@ -2844,12 +3204,22 @@ function panelHtml() {
                     <p class="nmcnative-note">支持当前分享链接和旧版房间 ID；创建方式可在房间卡片下方切换。</p>
                 </details>
 
-                <details class="nmcnative-details">
+                <details id="nmcnativeTogetherReplyDetails" class="nmcnative-details">
                     <summary>角色私信回复</summary>
-                    <p id="nmcnativeTogetherReplyContext" class="nmcnative-note">角色会结合当前歌曲、最近对话和绑定人设生成回复，不需要手动输入。</p>
+                    <div class="nmcnative-chat-toolbar">
+                        <span id="nmcnativeTogetherMessageState" class="nmcnative-list-summary">正在读取网易云私信...</span>
+                        <button id="nmcnativeRefreshTogetherMessages" type="button">刷新聊天记录</button>
+                    </div>
+                    <p id="nmcnativeTogetherReplyContext" class="nmcnative-note">读取你在网易云平台的私信记录，角色会结合聊天内容、当前歌曲和绑定人设连续回复 1–3 条消息。</p>
+                    <div id="nmcnativeTogetherMessageContacts" class="nmcnative-contact-list" role="listbox" aria-label="网易云私信联系人">
+                        <p class="nmcnative-list-empty">正在读取联系人...</p>
+                    </div>
+                    <div id="nmcnativeTogetherMessageHistory" class="nmcnative-chat-history" aria-live="polite">
+                        <p class="nmcnative-list-empty">选择联系人后显示聊天记录</p>
+                    </div>
                     <button id="nmcnativeGenerateTogetherReply" class="nmcnative-primary nmcnative-wide-button" type="button">让角色回应并发送</button>
                     <div id="nmcnativeTogetherMessageLog" class="nmcnative-message-log" aria-live="polite"></div>
-                    <p class="nmcnative-note">回复会通过当前网易云账号发送到配置好的私信收件人，本地记录不会同步历史消息。</p>
+                    <p class="nmcnative-note">回复会作为连续私信发送给当前选中的联系人，不需要你手动输入。</p>
                 </details>
             </section>
 
@@ -3040,6 +3410,7 @@ function bindEvents() {
             await api('/logout', { method: 'POST', body: { accountId } });
             closeQrPanel();
             resetTogetherPanel();
+            resetTogetherMessageState();
             await refreshStatus({ silent: true });
             resetPlaylistControls();
             setMessage(`账号 ${accountName(accountId)} 已退出登录。`, 'success');
@@ -3168,6 +3539,17 @@ function bindEvents() {
     });
     element('nmcnativeGenerateTogetherReply').addEventListener('click', () => {
         void withBusy('角色正在回复...', generateTogetherReply);
+    });
+    element('nmcnativeRefreshTogetherMessages').addEventListener('click', () => {
+        void withBusy('正在刷新网易云聊天记录...', async () => {
+            await refreshTogetherMessageContacts();
+            setMessage('网易云聊天记录已刷新。', 'success');
+        });
+    });
+    element('nmcnativeTogetherReplyDetails').addEventListener('toggle', event => {
+        if (event.target.open && state.togetherEnabled && state.messageContacts.length === 0) {
+            void withBusy('正在读取网易云私信...', refreshTogetherMessageContacts);
+        }
     });
     element('nmcnativeLoadSongComments').addEventListener('click', () => {
         void withBusy('正在读取评论...', loadSongComments);
@@ -3381,6 +3763,7 @@ async function initializePanel() {
         if (status.togetherEnabled) {
             await refreshTogetherState().catch(() => {});
             await refreshNativeServiceState().catch(() => {});
+            await refreshTogetherMessageContacts().catch(() => {});
         }
     } catch {
         setMessage('插件后端不可用。请确认 SillyTavern 已启用服务端插件并重启。', 'error');
