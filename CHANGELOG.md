@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.1.0
+
+- Added an in-SillyTavern music player with same-origin audio proxying and
+  HTTP Range support.
+- Added timed LRC lyric parsing, translation display, active-line tracking and
+  click-to-seek behavior.
+- Added song search and direct playback of the current Listen Together song.
+- Added a Listen Together message box that sends through the official NetEase
+  private-message endpoint to the configured room partner.
+- Added backend tests for the new routes and synchronized desktop/mobile usage
+  documentation.
+
 ## 1.0.1
 
 - Create the server-side room through the configured NeteaseCloudMusicApi,

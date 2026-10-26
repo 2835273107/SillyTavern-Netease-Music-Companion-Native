@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { TogetherBridge } from './together-bridge.js';
 
@@ -373,6 +374,42 @@ function normalizeTrackIds(input) {
         ids: normalized.slice(0, MAX_TRACKS_PER_REQUEST),
         truncated,
         originalUniqueCount: normalized.length,
+    };
+}
+
+async function resolveSongPlaybackUrl(songId, cookie, level = 'standard') {
+    const { body } = await requestNetease('/song/url/v1', {
+        params: {
+            id: songId,
+            level: ['standard', 'higher', 'exhigh', 'lossless'].includes(level)
+                ? level
+                : 'standard',
+        },
+        cookie,
+    });
+    const data = Array.isArray(body?.data)
+        ? body.data
+        : Array.isArray(upstreamData(body)?.data)
+            ? upstreamData(body).data
+            : [];
+    const url = cleanText(data[0]?.url, 2000);
+    if (!url) {
+        throw new PublicError('网易云未返回可播放地址，歌曲可能需要会员、已下架或当前账号无权播放', 502);
+    }
+    let parsed;
+    try {
+        parsed = new URL(url);
+    } catch {
+        throw new PublicError('网易云返回了无效的歌曲地址', 502);
+    }
+    if (!['http:', 'https:'].includes(parsed.protocol)) {
+        throw new PublicError('网易云返回了不支持的歌曲地址协议', 502);
+    }
+    return {
+        url: parsed.toString(),
+        type: cleanText(data[0]?.type, 40),
+        level: cleanText(data[0]?.level, 40),
+        size: Number(data[0]?.size) || 0,
     };
 }
 
@@ -1001,9 +1038,65 @@ export async function init(router) {
             cookie,
         });
         response.json({
-            lyric: String(body?.lrc?.lyric || ''),
-            translated: String(body?.tlyric?.lyric || ''),
+            lyric: String(body?.lrc?.lyric || upstreamData(body)?.lrc?.lyric || ''),
+            translated: String(body?.tlyric?.lyric || upstreamData(body)?.tlyric?.lyric || ''),
         });
+    }));
+
+    router.get('/song-audio/:songId', wrapRoute(async (request, response) => {
+        const songId = cleanText(request.params.songId, 80);
+        if (!/^\d{1,20}$/.test(songId)) {
+            throw new PublicError('songId 必须是数字歌曲 ID');
+        }
+        const cookie = activeCookieOrThrow();
+        const playback = await resolveSongPlaybackUrl(
+            songId,
+            cookie,
+            cleanText(request.query.level, 40) || 'standard',
+        );
+        const upstreamHeaders = {
+            Accept: '*/*',
+            Referer: 'https://music.163.com/',
+            'User-Agent': 'Mozilla/5.0',
+        };
+        if (request.headers.range) {
+            upstreamHeaders.Range = request.headers.range;
+        }
+        let upstream;
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 30_000);
+        try {
+            upstream = await fetch(playback.url, {
+                headers: upstreamHeaders,
+                signal: controller.signal,
+            });
+        } catch {
+            throw new PublicError('读取网易云音频失败，请稍后重试', 502);
+        } finally {
+            clearTimeout(timeout);
+        }
+        if (!upstream.ok) {
+            throw new PublicError(`网易云音频请求失败 (${upstream.status})`, 502);
+        }
+        response.status(upstream.status);
+        for (const name of [
+            'content-type',
+            'content-length',
+            'content-range',
+            'accept-ranges',
+        ]) {
+            const value = upstream.headers.get(name);
+            if (value) {
+                response.setHeader(name, value);
+            }
+        }
+        response.setHeader('Cache-Control', 'private, max-age=300');
+        response.setHeader('X-Content-Type-Options', 'nosniff');
+        if (!upstream.body) {
+            response.end();
+            return;
+        }
+        Readable.fromWeb(upstream.body).pipe(response);
     }));
 
     router.get('/together/status', wrapRoute(async (_request, response) => {
@@ -1224,6 +1317,7 @@ export async function init(router) {
             throw new PublicError('本地 API 暂未返回当前歌曲信息', 502);
         }
         response.json({
+            songId: song.songId,
             songName: song.songName,
             artist: song.artist,
             album: song.album,
@@ -1302,6 +1396,44 @@ export async function init(router) {
             ok: true,
             sentTo: settings.user_netease_id,
             inviteUrl: room.inviteUrl,
+        });
+    }));
+
+    router.post('/together/send-message', wrapRoute(async (request, response) => {
+        if (rejectTogetherDisabled(response)) {
+            return;
+        }
+        const cookie = activeCookieOrThrow();
+        const recipientId = cleanText(
+            request.body?.userId || settings.user_netease_id,
+            80,
+        );
+        const message = cleanText(request.body?.message, 500);
+        if (!/^\d{1,20}$/.test(recipientId)) {
+            throw new PublicError('请先在 config.json 配置有效的 user_netease_id');
+        }
+        if (!message) {
+            throw new PublicError('消息不能为空');
+        }
+        const { body } = await requestNetease('/send/text', {
+            method: 'POST',
+            params: {
+                msg: message,
+                user_ids: recipientId,
+            },
+            cookie,
+        });
+        const code = Number(body?.code ?? upstreamData(body)?.code);
+        if (Number.isFinite(code) && code !== 200) {
+            throw new PublicError(
+                cleanText(body?.message || body?.error, 240) || '一起听消息发送失败',
+                502,
+            );
+        }
+        response.json({
+            ok: true,
+            sentTo: recipientId,
+            delivery: 'private-message',
         });
     }));
 }

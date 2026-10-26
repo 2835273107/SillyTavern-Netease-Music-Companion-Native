@@ -24,6 +24,10 @@ const state = {
     loginPollToken: 0,
     togetherPollTimer: null,
     togetherPollFailures: 0,
+    playerSong: null,
+    playerSearchResults: [],
+    lyricLines: [],
+    lyricIndex: -1,
     panelObserver: null,
 };
 
@@ -486,6 +490,220 @@ function renderTogetherSong(song) {
         parts.push(`${format(seconds)} / ${format(duration)}`);
     }
     setText('nmcnativeTogetherSong', parts.join(' · '));
+}
+
+function parseLrc(lyricText, translatedText = '') {
+    const translations = new Map();
+    const parseLines = (text, callback) => {
+        for (const rawLine of String(text || '').split(/\r?\n/)) {
+            const timestamps = [...rawLine.matchAll(/\[(\d{1,3}):(\d{2}(?:\.\d{1,3})?)\]/g)];
+            if (!timestamps.length) {
+                continue;
+            }
+            const content = rawLine.replace(/\[[^\]]+\]/g, '').trim();
+            if (!content) {
+                continue;
+            }
+            for (const match of timestamps) {
+                const seconds = Number(match[1]) * 60 + Number(match[2]);
+                callback(seconds, content);
+            }
+        }
+    };
+    parseLines(translatedText, (seconds, content) => {
+        translations.set(seconds.toFixed(3), content);
+    });
+    const lines = [];
+    parseLines(lyricText, (time, text) => {
+        lines.push({
+            time,
+            text,
+            translation: translations.get(time.toFixed(3)) || '',
+        });
+    });
+    lines.sort((left, right) => left.time - right.time);
+    return lines;
+}
+
+function renderPlayerLyrics() {
+    const container = element('nmcnativePlayerLyrics');
+    if (!container) {
+        return;
+    }
+    state.lyricIndex = -1;
+    container.replaceChildren();
+    if (!state.lyricLines.length) {
+        const empty = document.createElement('p');
+        empty.className = 'nmcnative-lyrics-empty';
+        empty.textContent = state.playerSong ? '暂无可用歌词' : '播放或选择歌曲后显示歌词';
+        container.append(empty);
+        return;
+    }
+    state.lyricLines.forEach((line, index) => {
+        const row = document.createElement('button');
+        row.type = 'button';
+        row.className = 'nmcnative-lyric-line';
+        row.dataset.index = String(index);
+        row.dataset.time = String(line.time);
+        row.textContent = line.text;
+        if (line.translation) {
+            const translation = document.createElement('span');
+            translation.className = 'nmcnative-lyric-translation';
+            translation.textContent = line.translation;
+            row.append(translation);
+        }
+        row.addEventListener('click', () => {
+            const audio = element('nmcnativePlayerAudio');
+            if (audio && Number.isFinite(line.time)) {
+                audio.currentTime = line.time;
+            }
+        });
+        container.append(row);
+    });
+}
+
+function syncPlayerLyrics() {
+    const audio = element('nmcnativePlayerAudio');
+    if (!audio || !state.lyricLines.length) {
+        return;
+    }
+    const currentTime = Number(audio.currentTime) || 0;
+    let nextIndex = -1;
+    for (let index = 0; index < state.lyricLines.length; index += 1) {
+        if (state.lyricLines[index].time <= currentTime + 0.08) {
+            nextIndex = index;
+        } else {
+            break;
+        }
+    }
+    if (nextIndex === state.lyricIndex) {
+        return;
+    }
+    state.lyricIndex = nextIndex;
+    const container = element('nmcnativePlayerLyrics');
+    if (!container) {
+        return;
+    }
+    container.querySelectorAll('.nmcnative-lyric-line').forEach((row, index) => {
+        row.classList.toggle('active', index === nextIndex);
+    });
+    const active = container.querySelector(`.nmcnative-lyric-line[data-index="${nextIndex}"]`);
+    active?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+}
+
+async function loadPlayerSong(song, { autoplay = false } = {}) {
+    if (!song?.id) {
+        throw new Error('缺少歌曲 ID');
+    }
+    state.playerSong = {
+        id: String(song.id),
+        name: String(song.name || song.songName || song.song_name || '未知歌曲'),
+        artist: String(song.artist || song.artists || ''),
+        album: String(song.album || ''),
+    };
+    setText(
+        'nmcnativePlayerSong',
+        `《${state.playerSong.name}》${state.playerSong.artist ? ` · ${state.playerSong.artist}` : ''}${state.playerSong.album ? ` · ${state.playerSong.album}` : ''}`,
+    );
+    const audio = element('nmcnativePlayerAudio');
+    if (!audio) {
+        return;
+    }
+    audio.src = `${backendBase()}/song-audio/${encodeURIComponent(state.playerSong.id)}?level=standard`;
+    audio.dataset.songId = state.playerSong.id;
+    audio.load();
+    state.lyricLines = [];
+    renderPlayerLyrics();
+    try {
+        const lyric = await api(`/lyric?song_id=${encodeURIComponent(state.playerSong.id)}`);
+        if (audio.dataset.songId === state.playerSong.id) {
+            state.lyricLines = parseLrc(lyric.lyric, lyric.translated);
+            renderPlayerLyrics();
+        }
+    } catch (error) {
+        setMessage(error?.message || '歌词读取失败', 'error');
+    }
+    if (autoplay) {
+        try {
+            await audio.play();
+            setMessage(`正在酒馆中播放《${state.playerSong.name}》。`, 'success');
+        } catch {
+            setMessage('浏览器阻止了自动播放，请点击音频播放器上的播放按钮。', 'info');
+        }
+    }
+}
+
+async function searchPlayerSongs() {
+    const keyword = element('nmcnativePlayerSearchInput')?.value.trim();
+    if (!keyword) {
+        throw new Error('请输入歌曲、歌手或关键词');
+    }
+    const results = await api('/search-with-lyric', {
+        method: 'POST',
+        body: { keyword, limit: 8 },
+    });
+    state.playerSearchResults = Array.isArray(results) ? results : [];
+    const select = element('nmcnativePlayerSearchResults');
+    if (!select) {
+        return;
+    }
+    select.replaceChildren(option('', state.playerSearchResults.length
+        ? '— 选择搜索结果 —'
+        : '— 没有搜索结果 —'));
+    for (const song of state.playerSearchResults) {
+        select.append(option(
+            song.id,
+            `${song.name}${song.artist ? ` · ${song.artist}` : ''}`,
+        ));
+    }
+    if (state.playerSearchResults.length) {
+        select.value = state.playerSearchResults[0].id;
+    }
+    setMessage(`找到 ${state.playerSearchResults.length} 首候选歌曲。`, 'success');
+}
+
+async function playSelectedPlayerSong() {
+    const songId = element('nmcnativePlayerSearchResults')?.value;
+    const song = state.playerSearchResults.find(item => String(item.id) === String(songId));
+    if (!song) {
+        throw new Error('请先搜索并选择歌曲');
+    }
+    await loadPlayerSong(song, { autoplay: true });
+}
+
+async function playCurrentTogetherSong() {
+    await pollTogetherSongOnce();
+    if (!state.currentSong?.songId) {
+        throw new Error('一起听房间没有可用歌曲 ID，请先刷新当前歌曲');
+    }
+    await loadPlayerSong({
+        id: state.currentSong.songId,
+        name: state.currentSong.songName,
+        artist: state.currentSong.artist,
+        album: state.currentSong.album,
+    }, { autoplay: true });
+}
+
+async function sendTogetherMessage() {
+    const input = element('nmcnativeTogetherMessage');
+    const message = input?.value.trim();
+    if (!message) {
+        throw new Error('请输入要发送的消息');
+    }
+    const result = await api('/together/send-message', {
+        method: 'POST',
+        body: { message },
+    });
+    const log = element('nmcnativeTogetherMessageLog');
+    if (log) {
+        const row = document.createElement('p');
+        row.className = 'nmcnative-sent-message';
+        row.textContent = `我：${message}`;
+        log.append(row);
+        log.scrollTop = log.scrollHeight;
+    }
+    input.value = '';
+    setMessage(`消息已发送到一起听伙伴的网易云私信（${result.sentTo}）。`, 'success');
 }
 
 async function refreshTogetherState() {
@@ -954,6 +1172,79 @@ function injectStyles() {
         #netease-music-companion-native .nmcnative-invite {
             overflow-wrap: anywhere;
         }
+        #netease-music-companion-native audio {
+            width: 100%;
+            margin-top: 8px;
+        }
+        #netease-music-companion-native textarea {
+            width: 100%;
+            min-height: 64px;
+            box-sizing: border-box;
+            resize: vertical;
+            color: var(--SmartThemeBodyColor);
+            background: color-mix(in srgb, var(--SmartThemeBlurTintColor) 92%, transparent);
+            border: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor) 82%, transparent);
+            border-radius: 8px;
+            padding: 8px 9px;
+            font: inherit;
+        }
+        #netease-music-companion-native .nmcnative-lyrics {
+            max-height: 230px;
+            overflow-y: auto;
+            margin-top: 9px;
+            padding: 8px;
+            border: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor) 48%, transparent);
+            border-radius: 9px;
+            scroll-behavior: smooth;
+        }
+        #netease-music-companion-native .nmcnative-lyric-line {
+            display: block;
+            width: 100%;
+            min-height: 0;
+            padding: 6px 8px;
+            border: 0;
+            border-radius: 6px;
+            text-align: left;
+            white-space: normal;
+            opacity: .54;
+            background: transparent;
+            transition: opacity .16s ease, background-color .16s ease;
+        }
+        #netease-music-companion-native .nmcnative-lyric-line.active {
+            opacity: 1;
+            font-weight: 700;
+            background: color-mix(in srgb, var(--SmartThemeQuoteColor) 14%, transparent);
+        }
+        #netease-music-companion-native .nmcnative-lyric-translation {
+            display: block;
+            margin-top: 2px;
+            font-size: .76rem;
+            font-weight: 400;
+            opacity: .72;
+        }
+        #netease-music-companion-native .nmcnative-lyrics-empty {
+            margin: 0;
+            padding: 14px 8px;
+            text-align: center;
+            font-size: .8rem;
+            opacity: .65;
+        }
+        #netease-music-companion-native .nmcnative-message-log {
+            max-height: 130px;
+            overflow-y: auto;
+            margin-top: 8px;
+            padding: 7px 9px;
+            border-radius: 8px;
+            background: color-mix(in srgb, var(--SmartThemeBlurTintColor) 80%, transparent);
+        }
+        #netease-music-companion-native .nmcnative-message-log:empty {
+            display: none;
+        }
+        #netease-music-companion-native .nmcnative-sent-message {
+            margin: 3px 0;
+            font-size: .8rem;
+            overflow-wrap: anywhere;
+        }
         #netease-music-companion-native .nmcnative-message {
             margin-top: 12px;
             padding: 9px 10px;
@@ -1039,6 +1330,31 @@ function panelHtml() {
                 </div>
             </section>
 
+            <section class="nmcnative-section">
+                <p class="nmcnative-section-title">酒馆播放器</p>
+                <div class="nmcnative-field">
+                    <label for="nmcnativePlayerSearchInput">搜索歌曲</label>
+                    <input id="nmcnativePlayerSearchInput" type="search" placeholder="歌曲、歌手或关键词">
+                </div>
+                <div class="nmcnative-actions">
+                    <button id="nmcnativePlayerSearch" type="button">搜索</button>
+                    <button id="nmcnativePlayTogetherSong" type="button">播放一起听当前歌曲</button>
+                </div>
+                <div class="nmcnative-field">
+                    <label for="nmcnativePlayerSearchResults">搜索结果</label>
+                    <select id="nmcnativePlayerSearchResults">
+                        <option value="">— 先搜索歌曲 —</option>
+                    </select>
+                </div>
+                <button id="nmcnativePlaySelectedSong" class="nmcnative-wide-button" type="button">播放选中歌曲</button>
+                <p id="nmcnativePlayerSong" class="nmcnative-status-line">尚未载入歌曲</p>
+                <audio id="nmcnativePlayerAudio" controls preload="metadata"></audio>
+                <div id="nmcnativePlayerLyrics" class="nmcnative-lyrics">
+                    <p class="nmcnative-lyrics-empty">播放或选择歌曲后显示歌词</p>
+                </div>
+                <p class="nmcnative-note">音频通过插件后端代理播放。歌词会自动跟随播放进度，点击歌词可跳转。</p>
+            </section>
+
             <section id="nmcnativeTogetherSection" class="nmcnative-section">
                 <p class="nmcnative-section-title">一起听</p>
                 <div class="nmcnative-field">
@@ -1068,6 +1384,13 @@ function panelHtml() {
                     <button id="nmcnativeLeaveRoom" type="button">离开房间</button>
                 </div>
                 <p id="nmcnativeCharComment" class="nmcnative-status-line"></p>
+                <div class="nmcnative-field">
+                    <label for="nmcnativeTogetherMessage">发送给一起听伙伴的消息</label>
+                    <textarea id="nmcnativeTogetherMessage" maxlength="500" placeholder="输入消息..."></textarea>
+                </div>
+                <button id="nmcnativeSendTogetherMessage" class="nmcnative-wide-button" type="button">发送消息</button>
+                <div id="nmcnativeTogetherMessageLog" class="nmcnative-message-log" aria-live="polite"></div>
+                <p class="nmcnative-note">当前桌面客户端未公开房间聊天发送接口，此功能通过网易云私信发送给 config.json 中的一起听伙伴。</p>
                 <p class="nmcnative-note">可以直接创建房间，也可以粘贴网易云 App 分享链接或旧版房间号。两种模式均会保留。</p>
             </section>
 
@@ -1282,6 +1605,38 @@ function bindEvents() {
     });
     element('nmcnativeAddToCurrent').addEventListener('click', () => {
         void withBusy('角色正在为当前歌单选歌...', () => runAddToCurrentFlow());
+    });
+
+    element('nmcnativePlayerSearch').addEventListener('click', () => {
+        void withBusy('正在搜索歌曲...', searchPlayerSongs);
+    });
+    element('nmcnativePlayerSearchInput').addEventListener('keydown', event => {
+        if (event.key === 'Enter') {
+            event.preventDefault();
+            void withBusy('正在搜索歌曲...', searchPlayerSongs);
+        }
+    });
+    element('nmcnativePlaySelectedSong').addEventListener('click', () => {
+        void withBusy('正在载入歌曲...', playSelectedPlayerSong);
+    });
+    element('nmcnativePlayTogetherSong').addEventListener('click', () => {
+        void withBusy('正在读取一起听歌曲...', playCurrentTogetherSong);
+    });
+    element('nmcnativePlayerAudio').addEventListener('timeupdate', syncPlayerLyrics);
+    element('nmcnativePlayerAudio').addEventListener('seeked', syncPlayerLyrics);
+    element('nmcnativePlayerAudio').addEventListener('error', () => {
+        if (element('nmcnativePlayerAudio')?.src) {
+            setMessage('音频加载失败。歌曲可能需要会员、已下架或当前账号无权播放。', 'error');
+        }
+    });
+    element('nmcnativeSendTogetherMessage').addEventListener('click', () => {
+        void withBusy('正在发送消息...', sendTogetherMessage);
+    });
+    element('nmcnativeTogetherMessage').addEventListener('keydown', event => {
+        if (event.key === 'Enter' && !event.shiftKey) {
+            event.preventDefault();
+            void withBusy('正在发送消息...', sendTogetherMessage);
+        }
     });
 
     element('nmcnativeTogetherLink').addEventListener('change', () => {
