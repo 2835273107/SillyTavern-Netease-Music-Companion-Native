@@ -1260,6 +1260,39 @@ export async function init(router) {
         response.json(account.currentPlaylist);
     }));
 
+    router.get('/player/playlist-tracks/:playlistId', wrapRoute(async (request, response) => {
+        const playlistId = cleanText(request.params.playlistId, 80);
+        const requestedLimit = Number(request.query.limit) || 300;
+        const limit = Math.min(1000, Math.max(1, requestedLimit));
+        const offset = Math.max(0, Number(request.query.offset) || 0);
+        if (!/^\d{1,20}$/.test(playlistId)) {
+            throw new PublicError('playlistId 必须是数字歌单 ID');
+        }
+        const cookie = activeCookieOrThrow();
+        const { body } = await requestNetease('/playlist/track/all', {
+            params: { id: playlistId, limit, offset },
+            cookie,
+        });
+        const songs = Array.isArray(body?.songs)
+            ? body.songs
+            : Array.isArray(upstreamData(body)?.songs)
+                ? upstreamData(body).songs
+                : [];
+        response.json({
+            playlistId,
+            songs: songs.map(song => ({
+                id: cleanText(song.id, 80),
+                name: cleanText(song.name, 200),
+                artist: (song.ar || song.artists || [])
+                    .map(item => item.name)
+                    .filter(Boolean)
+                    .join(', '),
+                album: cleanText(song.al?.name || song.album?.name, 200),
+                duration: Number(song.dt || song.duration) || 0,
+            })).filter(song => song.id && song.name),
+        });
+    }));
+
     router.post('/set-current-playlist', wrapRoute(async (request, response) => {
         const { account } = getActiveAccount();
         const playlistId = cleanText(request.body?.playlist_id, 80);

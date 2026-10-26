@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.3.0
+
+- Added account playlist selection and track loading to the in-SillyTavern
+  player.
+- Added playlist-backed playback alongside song search.
+- Added a persistent four-tab interface for Player, Listen Together, Playlist
+  Management and Account.
+- Added mobile two-column tab sizing and more compact sub-sections.
+- Added playlist track and UI metadata regression checks.
+
 ## 1.2.0
 
 - Added the official desktop client's live room playlist to the plugin.
