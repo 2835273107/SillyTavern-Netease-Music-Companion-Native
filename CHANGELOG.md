@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.1
+
+- Create the server-side room through the configured NeteaseCloudMusicApi,
+  then activate the returned `roomInfo` in the official desktop client.
+- Replace the unstable Redux room-creation dispatch with the client's room
+  activation method and invite-modal override.
+- Correct stale-room cleanup to use `/api/listen/together/end/v2`.
+- Wait for the desktop client's leave callback and reset the client when stale
+  room state remains.
+- Verified room creation, heartbeat, share URL, native invitation and close
+  against the real Windows desktop client.
+
 ## 1.0.0
 
 - Introduced a standalone SillyTavern plugin namespace: backend ID

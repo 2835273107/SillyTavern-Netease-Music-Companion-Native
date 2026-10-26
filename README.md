@@ -200,12 +200,12 @@ NETEASE_NATIVE_NATIVE_TOKEN
 选择「独立原生服务」后，插件会：
 
 1. 启动内置 `together-native/service.py`。
-2. 检查桌面客户端和 CDP。
-3. 读取当前客户端账号与房间状态。
-4. 创建房间并确认客户端心跳。
+2. 通过本地 NeteaseCloudMusicApi 创建服务端房间并取得 `roomInfo`。
+3. 检查桌面客户端和 CDP，将 `roomInfo` 交给官方客户端激活。
+4. 确认客户端状态为 `waiting`/`togetherOwner` 且心跳已启动。
 5. 向 `user_netease_id` 发送原生邀请。
 6. 返回房间 ID 和分享链接。
-7. 退出时调用桌面客户端离开房间。
+7. 退出时等待客户端 leave 回调，清理残留房间并重置客户端状态。
 
 Windows 客户端首次使用时，服务会以调试参数重启客户端。房间创建与心跳由官方桌面客户端维持。
 
@@ -227,6 +227,7 @@ Windows 客户端首次使用时，服务会以调试参数重启客户端。房
 $env:NETEASE_NATIVE_SERVICE_COOKIE = "MUSIC_U=你的值; __csrf=你的值"
 $env:NETEASE_NATIVE_SERVICE_RECEIVER_ID = "接收方数字用户ID"
 $env:NETEASE_NATIVE_SERVICE_CLIENT_PATH = "D:\CloudMusic\cloudmusic.exe"
+$env:NETEASE_NATIVE_SERVICE_API_BASE = "http://127.0.0.1:3000"
 $env:NETEASE_NATIVE_SERVICE_HOST = "0.0.0.0"
 $env:NETEASE_NATIVE_SERVICE_PORT = "3472"
 $env:NETEASE_NATIVE_SERVICE_TOKEN = "至少32字节的随机值"

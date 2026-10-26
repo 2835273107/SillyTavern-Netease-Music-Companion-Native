@@ -32,8 +32,10 @@ service. For remote use, the operator starts the service separately and gives
 the plugin its URL and token.
 
 The service controls the official desktop client through its loopback CDP
-endpoint. It verifies that the Cookie account, desktop-client account and
-plugin account are consistent before reporting success.
+endpoint. Room creation first uses the configured NeteaseCloudMusicApi to get
+the server-side `roomInfo`, then activates that room in the official client.
+The service verifies that the Cookie account, desktop-client account and plugin
+account are consistent before reporting success.
 
 ## Isolation from v1
 

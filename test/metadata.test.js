@@ -14,9 +14,9 @@ test('keeps manifest, package and config on the native namespace', () => {
     const frontend = read('index.js');
     const backend = read('plugin/index.js');
 
-    assert.equal(manifest.version, '1.0.0');
+    assert.equal(manifest.version, '1.0.1');
     assert.equal(manifest.homePage.endsWith('SillyTavern-Netease-Music-Companion-Native'), true);
-    assert.equal(packageJson.version, '1.0.0');
+    assert.equal(packageJson.version, '1.0.1');
     assert.equal(packageJson.name, 'sillytavern-netease-music-companion-native');
     assert.equal(config.togetherNative.port, 3472);
     assert.equal(config.togetherNative.autoStart, false);

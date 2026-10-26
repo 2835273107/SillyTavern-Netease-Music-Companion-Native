@@ -589,6 +589,7 @@ async function ensureNativeService({ forceRestart = false } = {}) {
         accountId,
         cookie,
         targetUserId: settings.user_netease_id,
+        apiBase: getApiBase(),
         pythonPath: nativeService.pythonPath || process.env.NETEASE_NATIVE_NATIVE_PYTHON || 'python',
         appPath: nativeService.appPath || process.env.NETEASE_NATIVE_NATIVE_CLIENT_PATH || '',
         debugPort: nativeService.debugPort || 9222,

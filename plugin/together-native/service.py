@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any
 
 
-SERVICE_VERSION = "1.0.0"
+SERVICE_VERSION = "1.1.0"
 HOST = os.environ.get("NETEASE_NATIVE_SERVICE_HOST", "127.0.0.1").strip()
 PORT = int(os.environ.get("NETEASE_NATIVE_SERVICE_PORT", "3472"))
 TOKEN = os.environ.get("NETEASE_NATIVE_SERVICE_TOKEN", "").strip()
@@ -38,6 +38,10 @@ RECEIVER_ID = os.environ.get(
 ).strip()
 CDP_PORT = int(os.environ.get("NETEASE_NATIVE_SERVICE_CDP_PORT", "9222"))
 CLIENT_OVERRIDE = os.environ.get("NETEASE_NATIVE_SERVICE_CLIENT_PATH", "").strip()
+API_BASE = os.environ.get(
+    "NETEASE_NATIVE_SERVICE_API_BASE",
+    "http://127.0.0.1:3000",
+).rstrip("/")
 
 API_ORIGIN = "https://music.163.com"
 SHARE_ORIGIN = "https://st.music.163.com/listen-together/share/index.html"
@@ -103,6 +107,38 @@ def _api_request(
             return json.loads(response.read().decode("utf-8"))
     except (OSError, ValueError, urllib.error.URLError) as exc:
         raise ServiceError("NetEase API request failed: " + _redact(exc)) from exc
+
+
+def _local_api_request(path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    body = json.dumps(
+        {**payload, "cookie": COOKIE},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        API_BASE + path,
+        data=body,
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    except (OSError, ValueError, urllib.error.URLError) as exc:
+        raise ServiceError(
+            "NeteaseCloudMusicApi request failed: " + _redact(exc)
+        ) from exc
+    code = result.get("code")
+    if code is not None and int(code) != 200:
+        raise ServiceError(
+            result.get("message")
+            or result.get("msg")
+            or "NeteaseCloudMusicApi room creation failed"
+        )
+    return result
 
 
 def _account_uid() -> str:
@@ -260,7 +296,7 @@ class WebSocket:
             or not parsed.port
         ):
             raise ServiceError("Refusing a non-local debugger endpoint")
-        self.socket = socket.create_connection((parsed.hostname, parsed.port), timeout=12)
+        self.socket = socket.create_connection((parsed.hostname, parsed.port), timeout=30)
         path = parsed.path or "/"
         if parsed.query:
             path += "?" + parsed.query
@@ -471,7 +507,7 @@ def _clear_stale_room() -> None:
         room = data.get("roomInfo") or {}
         if data.get("inRoom") and room.get("roomId"):
             _api_request(
-                "/api/listen/together/end/native",
+                "/api/listen/together/end/v2",
                 {
                     "roomId": str(room["roomId"]),
                     "shareInfo": "{}",
@@ -481,30 +517,32 @@ def _clear_stale_room() -> None:
         return
 
 
-def _create_room_on_client(websocket: WebSocket) -> dict[str, Any]:
+def _activate_room_on_client(
+    websocket: WebSocket,
+    room_info: dict[str, Any],
+) -> dict[str, Any]:
     ids = _module_ids()
     script = r"""
-(async () => {
+(async roomInfo => {
   const require = window.__neteaseCompanionRequire;
   const core = require(__CORE__).a;
   const utility = require(__UTILITY__).c;
   const modal = require(__MODAL__).default;
-  const store = core.getStore();
-  const previousRoom = ((store["async:listenTogether"] || {}).roomInfo || {}).roomId || "";
   const originalInvite = modal.listenTogetherInvite;
   modal.listenTogetherInvite = () => Promise.resolve({ inviteFriendHandle: () => {} });
   try {
-    await Promise.resolve(core.getDispatch()({
-      type: "async:listenTogether/startListenTogether",
-      payload: { target: "renew_invite", refer: "songplay_more" }
-    }));
+    await utility.createListeningRoomAfterServerCheck({
+      data: { type: "NEW_ROOM", roomInfo },
+      refer: "songplay_more",
+      target: "renew_invite"
+    }, false);
     for (let attempt = 0; attempt < 32; attempt += 1) {
       const current = core.getStore()["async:listenTogether"] || {};
       const room = current.roomInfo || {};
       if (
         room.roomId
         && room.creatorId
-        && room.roomId !== previousRoom
+        && room.roomId === roomInfo.roomId
         && ["waiting", "togetherOwner"].includes(utility.utilStatus)
         && utility.heartbeatCounting != null
       ) {
@@ -517,17 +555,20 @@ def _create_room_on_client(websocket: WebSocket) -> dict[str, Any]:
       }
       await new Promise(resolve => setTimeout(resolve, 250));
     }
-    throw new Error("The official client did not finish creating the room");
+    throw new Error("The official client did not activate the room");
   } finally {
     modal.listenTogetherInvite = originalInvite;
   }
-})()
+})(__ROOM_INFO__)
 """.replace("__CORE__", str(ids["core"])).replace(
         "__UTILITY__", str(ids["utility"])
-    ).replace("__MODAL__", str(ids["modal"]))
+    ).replace("__MODAL__", str(ids["modal"])).replace(
+        "__ROOM_INFO__",
+        json.dumps(room_info, ensure_ascii=False, separators=(",", ":")),
+    )
     result = websocket.evaluate(script, await_promise=True)
     if not isinstance(result, dict) or not result.get("roomId"):
-        raise ServiceError("The official client did not return a room")
+        raise ServiceError("The official client did not activate the room")
     return result
 
 
@@ -607,7 +648,11 @@ def create_room() -> dict[str, Any]:
         if not websocket.evaluate(BOOTSTRAP):
             raise ServiceError("Could not access the NetEase client runtime")
         state = _client_state(websocket)
-        if state.get("roomId") and state.get("heartbeatActive"):
+        if (
+            state.get("roomId")
+            and state.get("heartbeatActive")
+            and state.get("status") in {"waiting", "togetherOwner", "together"}
+        ):
             creator = state.get("creatorId") or state.get("hostUid") or ""
             return {
                 "success": True,
@@ -623,7 +668,12 @@ def create_room() -> dict[str, Any]:
                 "heartbeatActive": True,
             }
         _clear_stale_room()
-        room = _create_room_on_client(websocket)
+        created = _local_api_request("/listentogether/room/create", {})
+        created_data = created.get("data") or {}
+        created_room = created_data.get("roomInfo") or {}
+        if not created_room.get("roomId") or not created_room.get("creatorId"):
+            raise ServiceError("NeteaseCloudMusicApi did not return roomInfo")
+        room = _activate_room_on_client(websocket, created_room)
         state = _client_state(websocket)
         cookie_uid = _account_uid()
         host_uid = str(state.get("hostUid") or "")
@@ -652,6 +702,7 @@ def create_room() -> dict[str, Any]:
         song_id = str(state.get("songId") or "")
         return {
             "success": True,
+            "roomCreated": True,
             "roomId": str(room["roomId"]),
             "creatorId": str(room["creatorId"]),
             "currentSongId": song_id,
@@ -675,22 +726,50 @@ def close_room() -> dict[str, Any]:
         if not state.get("roomId"):
             return {"success": True, "alreadyLeft": True}
         utility_id = _module_ids()["utility"]
-        websocket.evaluate(
-            f"window.__neteaseCompanionRequire({utility_id}).c"
-            ".leaveListenTogether({silent:true}); true"
+        result = websocket.evaluate(
+            f"""new Promise(resolve => {{
+  window.__neteaseCompanionRequire({utility_id}).c.leaveListenTogether({{
+    silent: true,
+    roomId: {json.dumps(str(state["roomId"]))},
+    callback: (ok, detail) => resolve({{ ok: Boolean(ok), detail: detail || null }})
+  }});
+}})""",
+            await_promise=True,
         )
-        for _ in range(30):
-            time.sleep(0.2)
-            current = _client_state(websocket)
-            if not current.get("roomId"):
-                return {
-                    "success": True,
-                    "roomId": state["roomId"],
-                }
-        raise ServiceError("The official client did not leave the room")
+        if isinstance(result, dict) and result.get("ok"):
+            return {
+                "success": True,
+                "roomId": state["roomId"],
+                "detail": result.get("detail"),
+            }
+        return {
+            "success": False,
+            "roomId": state["roomId"],
+            "message": "The official client did not complete the leave callback",
+        }
 
     with CLIENT_LOCK:
-        return _with_debugger(leave)
+        result = _with_debugger(leave)
+    _clear_stale_room()
+    for _ in range(20):
+        time.sleep(0.25)
+        payload = _api_request("/api/listen/together/status/get", {})
+        data = payload.get("data") or {}
+        if not data.get("inRoom"):
+            break
+    else:
+        raise ServiceError("The room could not be closed on the server")
+
+    with CLIENT_LOCK:
+        if not _stop_client():
+            raise ServiceError("The client could not be restarted after closing")
+        _start_debug_client()
+    return {
+        "success": True,
+        "roomId": result.get("roomId"),
+        "leaveCallbackOk": result.get("success") is True,
+        "clientReset": True,
+    }
 
 
 def current_song() -> dict[str, Any]:
