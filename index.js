@@ -30,6 +30,7 @@ const state = {
     togetherPollFailures: 0,
     playerSong: null,
     playerSearchResults: [],
+    playlists: [],
     playerPlaylists: [],
     playerPlaylistTracks: [],
     playerSelectionSource: 'search',
@@ -271,11 +272,15 @@ function updatePlaylistControls() {
     const select = element('nmcnativeTargetPlaylist');
     const refresh = element('nmcnativeRefreshPlaylists');
     const use = element('nmcnativeUsePlaylist');
+    const search = element('nmcnativeTargetPlaylistSearch');
     if (select) {
         select.disabled = !canUsePlaylists;
     }
     if (refresh) {
         refresh.disabled = !canUsePlaylists;
+    }
+    if (search) {
+        search.disabled = !canUsePlaylists;
     }
     if (use) {
         use.disabled = !canUsePlaylists || !select?.value;
@@ -291,6 +296,145 @@ async function refreshCurrentPlaylist() {
     }
 }
 
+function playlistMatches(playlist, query) {
+    const needle = String(query || '').trim().toLowerCase();
+    if (!needle) {
+        return true;
+    }
+    return [playlist.name, playlist.creator]
+        .some(value => String(value || '').toLowerCase().includes(needle));
+}
+
+function updatePlaylistChoiceSelection(listId, selectedId) {
+    element(listId)?.querySelectorAll('.nmcnative-playlist-choice').forEach(row => {
+        const selected = String(row.dataset.playlistId || '') === String(selectedId || '');
+        row.classList.toggle('selected', selected);
+        row.setAttribute('aria-selected', String(selected));
+    });
+}
+
+function renderPlaylistChoices({
+    listId,
+    selectId,
+    playlists,
+    query = '',
+    onSelect,
+}) {
+    const list = element(listId);
+    const select = element(selectId);
+    if (!list || !select) {
+        return;
+    }
+    const filtered = playlists.filter(playlist => playlistMatches(playlist, query));
+    list.replaceChildren();
+    if (!playlists.length) {
+        const empty = document.createElement('p');
+        empty.className = 'nmcnative-list-empty';
+        empty.textContent = state.loggedIn ? '没有读取到歌单' : '登录后显示歌单';
+        list.append(empty);
+        return;
+    }
+    if (!filtered.length) {
+        const empty = document.createElement('p');
+        empty.className = 'nmcnative-list-empty';
+        empty.textContent = '没有匹配的歌单';
+        list.append(empty);
+        return;
+    }
+    filtered.forEach((playlist, index) => {
+        const row = document.createElement('button');
+        row.type = 'button';
+        row.className = 'nmcnative-playlist-choice';
+        row.dataset.playlistId = String(playlist.id);
+        row.setAttribute('role', 'option');
+        row.setAttribute('aria-selected', String(String(playlist.id) === String(select.value || '')));
+        if (row.getAttribute('aria-selected') === 'true') {
+            row.classList.add('selected');
+        }
+
+        const mark = document.createElement('span');
+        mark.className = 'nmcnative-playlist-mark';
+        mark.textContent = playlist.isLiked ? '♥' : String(index + 1).padStart(2, '0');
+
+        const body = document.createElement('span');
+        body.className = 'nmcnative-playlist-body';
+        const name = document.createElement('span');
+        name.className = 'nmcnative-playlist-name';
+        name.textContent = playlist.name || '未命名歌单';
+        const meta = document.createElement('span');
+        meta.className = 'nmcnative-playlist-meta';
+        meta.textContent = [
+            `${Number(playlist.trackCount) || 0} 首`,
+            playlist.creator || '',
+            playlist.isLiked ? '我喜欢的音乐' : '',
+        ].filter(Boolean).join(' · ');
+        body.append(name, meta);
+        row.append(mark, body);
+        row.addEventListener('click', () => {
+            select.value = String(playlist.id);
+            updatePlaylistChoiceSelection(listId, select.value);
+            onSelect?.(playlist);
+        });
+        list.append(row);
+    });
+}
+
+function setPlaylistSummary(id, text) {
+    setText(id, text);
+}
+
+function renderPlayerPlaylistChoices() {
+    renderPlaylistChoices({
+        listId: 'nmcnativePlayerPlaylistList',
+        selectId: 'nmcnativePlayerPlaylist',
+        playlists: state.playerPlaylists,
+        query: element('nmcnativePlayerPlaylistSearch')?.value || '',
+        onSelect: playlist => {
+            state.playerSelectionSource = 'playlist';
+            state.playerPlaylistTracks = [];
+            renderPlayerPlaylistTrackChoices('正在读取歌曲...');
+            setPlaylistSummary(
+                'nmcnativePlayerPlaylistSummary',
+                `${playlist.name || '未命名歌单'} · ${Number(playlist.trackCount) || 0} 首`,
+            );
+            void withBusy('正在读取歌单歌曲...', loadPlayerPlaylistTracks);
+        },
+    });
+    const visibleCount = state.playerPlaylists.filter(
+        playlist => playlistMatches(playlist, element('nmcnativePlayerPlaylistSearch')?.value),
+    ).length;
+    setPlaylistSummary(
+        'nmcnativePlayerPlaylistSummary',
+        state.playerPlaylists.length
+            ? `显示 ${visibleCount} / ${state.playerPlaylists.length} 个歌单`
+            : '尚未读取歌单',
+    );
+}
+
+function renderTargetPlaylistChoices() {
+    const select = element('nmcnativeTargetPlaylist');
+    renderPlaylistChoices({
+        listId: 'nmcnativeTargetPlaylistList',
+        selectId: 'nmcnativeTargetPlaylist',
+        playlists: state.playlists,
+        query: element('nmcnativeTargetPlaylistSearch')?.value || '',
+        onSelect: playlist => {
+            renderTargetPlaylistStatus(`已选择：${playlist.name || '未命名歌单'}，点击“使用选中歌单”生效。`);
+            updatePlaylistControls();
+        },
+    });
+    const visibleCount = state.playlists.filter(
+        playlist => playlistMatches(playlist, element('nmcnativeTargetPlaylistSearch')?.value),
+    ).length;
+    setPlaylistSummary(
+        'nmcnativeTargetPlaylistSummary',
+        state.playlists.length
+            ? `显示 ${visibleCount} / ${state.playlists.length} 个歌单`
+            : '尚未读取歌单',
+    );
+    updatePlaylistChoiceSelection('nmcnativeTargetPlaylistList', select?.value);
+}
+
 async function refreshPlaylists() {
     const select = element('nmcnativeTargetPlaylist');
     if (!select || !state.loggedIn) {
@@ -300,6 +444,7 @@ async function refreshPlaylists() {
     const previousValue = select.value || state.currentPlaylist?.id || '';
     select.replaceChildren(option('', '— 选择一个已有歌单 —'));
     const playlists = await api('/user-playlists');
+    state.playlists = Array.isArray(playlists) ? playlists : [];
     for (const playlist of playlists) {
         const liked = playlist.isLiked ? '（红心）' : '';
         select.append(option(
@@ -316,6 +461,7 @@ async function refreshPlaylists() {
     }
     updatePlaylistControls();
     renderTargetPlaylistStatus();
+    renderTargetPlaylistChoices();
 }
 
 function resetPlaylistControls() {
@@ -324,6 +470,12 @@ function resetPlaylistControls() {
         select.replaceChildren(option('', '— 选择一个已有歌单 —'));
         select.value = '';
     }
+    state.playlists = [];
+    state.playerPlaylists = [];
+    state.playerPlaylistTracks = [];
+    renderTargetPlaylistChoices();
+    renderPlayerPlaylistChoices();
+    renderPlayerPlaylistTrackChoices();
     renderTargetPlaylistStatus('尚未选择目标歌单');
     updatePlaylistControls();
 }
@@ -737,6 +889,100 @@ async function refreshPlayerPlaylists() {
     } else if (state.playerPlaylists.length) {
         select.value = String(state.playerPlaylists[0].id);
     }
+    renderPlayerPlaylistChoices();
+}
+
+function trackMatches(track, query) {
+    const needle = String(query || '').trim().toLowerCase();
+    if (!needle) {
+        return true;
+    }
+    return [track.name, track.artist, track.album]
+        .some(value => String(value || '').toLowerCase().includes(needle));
+}
+
+function formatTrackDuration(value) {
+    const seconds = Math.max(0, Math.floor((Number(value) || 0) / 1000));
+    if (!seconds) {
+        return '';
+    }
+    return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+}
+
+function renderPlayerPlaylistTrackChoices(emptyText = '') {
+    const list = element('nmcnativePlayerTrackList');
+    const select = element('nmcnativePlayerPlaylistTrack');
+    if (!list || !select) {
+        return;
+    }
+    const filtered = state.playerPlaylistTracks.filter(
+        track => trackMatches(track, element('nmcnativePlayerTrackSearch')?.value),
+    );
+    list.replaceChildren();
+    setPlaylistSummary(
+        'nmcnativePlayerTrackSummary',
+        state.playerPlaylistTracks.length
+            ? `显示 ${filtered.length} / ${state.playerPlaylistTracks.length} 首`
+            : emptyText || '尚未读取歌曲',
+    );
+    if (!state.playerPlaylistTracks.length) {
+        const empty = document.createElement('p');
+        empty.className = 'nmcnative-list-empty';
+        empty.textContent = emptyText || '选择歌单后显示歌曲';
+        list.append(empty);
+        return;
+    }
+    if (!filtered.length) {
+        const empty = document.createElement('p');
+        empty.className = 'nmcnative-list-empty';
+        empty.textContent = '没有匹配的歌曲';
+        list.append(empty);
+        return;
+    }
+    filtered.forEach((track, index) => {
+        const row = document.createElement('button');
+        row.type = 'button';
+        row.className = 'nmcnative-track-choice';
+        row.dataset.songId = String(track.id);
+        row.setAttribute('role', 'option');
+        const selected = String(track.id) === String(select.value || '');
+        row.classList.toggle('selected', selected);
+        row.setAttribute('aria-selected', String(selected));
+
+        const number = document.createElement('span');
+        number.className = 'nmcnative-track-number';
+        number.textContent = String(index + 1).padStart(2, '0');
+        const body = document.createElement('span');
+        body.className = 'nmcnative-track-body';
+        const name = document.createElement('span');
+        name.className = 'nmcnative-track-name';
+        name.textContent = track.name || '未知歌曲';
+        const meta = document.createElement('span');
+        meta.className = 'nmcnative-track-meta';
+        meta.textContent = [
+            track.artist || '未知歌手',
+            track.album || '',
+            formatTrackDuration(track.duration),
+        ].filter(Boolean).join(' · ');
+        const stateLabel = document.createElement('span');
+        stateLabel.className = 'nmcnative-track-state';
+        stateLabel.textContent = selected ? '已选' : '选择';
+        body.append(name, meta);
+        row.append(number, body, stateLabel);
+        row.addEventListener('click', () => {
+            select.value = String(track.id);
+            list.querySelectorAll('.nmcnative-track-choice').forEach(item => {
+                const isSelected = item.dataset.songId === String(track.id);
+                item.classList.toggle('selected', isSelected);
+                item.setAttribute('aria-selected', String(isSelected));
+                const itemState = item.querySelector('.nmcnative-track-state');
+                if (itemState) {
+                    itemState.textContent = isSelected ? '已选' : '选择';
+                }
+            });
+        });
+        list.append(row);
+    });
 }
 
 async function loadPlayerPlaylistTracks() {
@@ -758,6 +1004,16 @@ async function loadPlayerPlaylistTracks() {
         if (state.playerPlaylistTracks.length) {
             select.value = String(state.playerPlaylistTracks[0].id);
         }
+    }
+    renderPlayerPlaylistTrackChoices();
+    const playlist = state.playerPlaylists.find(
+        item => String(item.id) === String(playlistId),
+    );
+    if (playlist) {
+        setPlaylistSummary(
+            'nmcnativePlayerPlaylistSummary',
+            `${playlist.name || '未命名歌单'} · ${Number(playlist.trackCount) || 0} 首 · 已读取`,
+        );
     }
     setMessage(`已加载歌单中的 ${state.playerPlaylistTracks.length} 首歌曲。`, 'success');
 }
@@ -1951,6 +2207,119 @@ function injectStyles() {
         #netease-music-companion-native .nmcnative-row .nmcnative-field {
             margin-bottom: 0;
         }
+        #netease-music-companion-native .nmcnative-list-summary {
+            margin: 0 0 6px;
+            font-size: .74rem;
+            opacity: .66;
+        }
+        #netease-music-companion-native .nmcnative-playlist-list,
+        #netease-music-companion-native .nmcnative-track-list {
+            display: flex;
+            flex-direction: column;
+            gap: 3px;
+            max-height: 232px;
+            overflow-y: auto;
+            margin: 0 0 9px;
+            padding: 4px;
+            border: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor) 36%, transparent);
+            border-radius: 10px;
+            background: color-mix(in srgb, var(--SmartThemeBlurTintColor) 56%, transparent);
+            scrollbar-gutter: stable;
+        }
+        #netease-music-companion-native .nmcnative-track-list {
+            max-height: 276px;
+        }
+        #netease-music-companion-native .nmcnative-playlist-choice,
+        #netease-music-companion-native .nmcnative-track-choice {
+            display: grid;
+            width: 100%;
+            min-height: 43px;
+            margin: 0;
+            padding: 6px 7px;
+            text-align: left;
+            border-color: transparent;
+            background: transparent;
+        }
+        #netease-music-companion-native .nmcnative-playlist-choice {
+            grid-template-columns: 28px minmax(0, 1fr);
+            align-items: center;
+            gap: 7px;
+        }
+        #netease-music-companion-native .nmcnative-playlist-choice:hover,
+        #netease-music-companion-native .nmcnative-track-choice:hover {
+            border-color: color-mix(in srgb, var(--SmartThemeBorderColor) 36%, transparent);
+        }
+        #netease-music-companion-native .nmcnative-playlist-choice.selected,
+        #netease-music-companion-native .nmcnative-track-choice.selected {
+            border-color: color-mix(in srgb, var(--SmartThemeQuoteColor) 38%, var(--SmartThemeBorderColor));
+            background: color-mix(in srgb, var(--SmartThemeQuoteColor) 15%, transparent);
+        }
+        #netease-music-companion-native .nmcnative-playlist-mark {
+            display: grid;
+            place-items: center;
+            width: 27px;
+            height: 27px;
+            border-radius: 7px;
+            color: color-mix(in srgb, var(--SmartThemeQuoteColor) 82%, var(--SmartThemeBodyColor));
+            background: color-mix(in srgb, var(--SmartThemeQuoteColor) 12%, transparent);
+            font-size: .69rem;
+            font-weight: 750;
+        }
+        #netease-music-companion-native .nmcnative-playlist-body,
+        #netease-music-companion-native .nmcnative-track-body {
+            display: flex;
+            min-width: 0;
+            flex-direction: column;
+            gap: 1px;
+        }
+        #netease-music-companion-native .nmcnative-playlist-name,
+        #netease-music-companion-native .nmcnative-track-name {
+            display: block;
+            overflow: hidden;
+            font-size: .79rem;
+            font-weight: 650;
+            line-height: 1.35;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        #netease-music-companion-native .nmcnative-playlist-meta,
+        #netease-music-companion-native .nmcnative-track-meta {
+            display: block;
+            overflow: hidden;
+            font-size: .7rem;
+            line-height: 1.35;
+            opacity: .6;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        #netease-music-companion-native .nmcnative-track-choice {
+            grid-template-columns: 25px minmax(0, 1fr) auto;
+            align-items: center;
+            gap: 6px;
+        }
+        #netease-music-companion-native .nmcnative-track-number {
+            font-size: .66rem;
+            font-variant-numeric: tabular-nums;
+            opacity: .46;
+            text-align: center;
+        }
+        #netease-music-companion-native .nmcnative-track-state {
+            font-size: .67rem;
+            opacity: .52;
+            white-space: nowrap;
+        }
+        #netease-music-companion-native .nmcnative-track-choice.selected .nmcnative-track-state {
+            color: color-mix(in srgb, var(--SmartThemeQuoteColor) 76%, var(--SmartThemeBodyColor));
+            opacity: .9;
+        }
+        #netease-music-companion-native .nmcnative-list-empty {
+            margin: 0;
+            padding: 14px 8px;
+            text-align: center;
+            font-size: .76rem;
+            line-height: 1.45;
+            opacity: .58;
+        }
         #netease-music-companion-native .nmcnative-source-switch {
             display: grid;
             grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2299,22 +2668,33 @@ function panelHtml() {
                 <div data-nmcnative-player-source-panel="playlist" data-active="true">
                     <div class="nmcnative-row">
                         <div class="nmcnative-field">
-                            <label for="nmcnativePlayerPlaylist">歌单</label>
-                            <select id="nmcnativePlayerPlaylist">
-                                <option value="">— 刷新歌单后选择 —</option>
-                            </select>
+                            <label for="nmcnativePlayerPlaylistSearch">筛选歌单</label>
+                            <input id="nmcnativePlayerPlaylistSearch" type="search" placeholder="歌单名或创建者">
                         </div>
-                        <button id="nmcnativeRefreshPlayerPlaylists" type="button">刷新</button>
+                        <button id="nmcnativeRefreshPlayerPlaylists" type="button">刷新歌单</button>
                     </div>
+                    <p id="nmcnativePlayerPlaylistSummary" class="nmcnative-list-summary">尚未读取歌单</p>
+                    <div id="nmcnativePlayerPlaylistList" class="nmcnative-playlist-list" role="listbox" aria-label="账号歌单">
+                        <p class="nmcnative-list-empty">正在读取歌单...</p>
+                    </div>
+                    <select id="nmcnativePlayerPlaylist" hidden aria-hidden="true">
+                        <option value="">— 刷新歌单后选择 —</option>
+                    </select>
+                    <p class="nmcnative-subsection-title">歌曲列表</p>
                     <div class="nmcnative-field">
-                        <label for="nmcnativePlayerPlaylistTrack">歌曲</label>
-                        <select id="nmcnativePlayerPlaylistTrack">
-                            <option value="">— 先读取歌单 —</option>
-                        </select>
+                        <label for="nmcnativePlayerTrackSearch">筛选歌曲</label>
+                        <input id="nmcnativePlayerTrackSearch" type="search" placeholder="歌曲、歌手或专辑">
                     </div>
+                    <p id="nmcnativePlayerTrackSummary" class="nmcnative-list-summary">尚未读取歌曲</p>
+                    <div id="nmcnativePlayerTrackList" class="nmcnative-track-list" role="listbox" aria-label="歌单歌曲">
+                        <p class="nmcnative-list-empty">选择歌单后显示歌曲</p>
+                    </div>
+                    <select id="nmcnativePlayerPlaylistTrack" hidden aria-hidden="true">
+                        <option value="">— 先读取歌单 —</option>
+                    </select>
                     <div class="nmcnative-actions">
-                        <button id="nmcnativeLoadPlayerPlaylist" type="button">读取歌曲</button>
                         <button id="nmcnativePlayPlaylistTrack" class="nmcnative-primary" type="button">播放选中歌曲</button>
+                        <button id="nmcnativeLoadPlayerPlaylist" type="button">重新读取歌曲</button>
                     </div>
                 </div>
 
@@ -2450,11 +2830,16 @@ function panelHtml() {
             <section class="nmcnative-section" data-nmcnative-panel="playlists" data-active="false">
                 <p class="nmcnative-section-title">歌单管理</p>
                 <div class="nmcnative-field">
-                    <label for="nmcnativeTargetPlaylist">目标歌单</label>
-                    <select id="nmcnativeTargetPlaylist">
-                        <option value="">— 选择一个已有歌单 —</option>
-                    </select>
+                    <label for="nmcnativeTargetPlaylistSearch">筛选目标歌单</label>
+                    <input id="nmcnativeTargetPlaylistSearch" type="search" placeholder="歌单名或创建者">
                 </div>
+                <p id="nmcnativeTargetPlaylistSummary" class="nmcnative-list-summary">尚未读取歌单</p>
+                <div id="nmcnativeTargetPlaylistList" class="nmcnative-playlist-list nmcnative-target-playlist-list" role="listbox" aria-label="目标歌单">
+                    <p class="nmcnative-list-empty">正在读取歌单...</p>
+                </div>
+                <select id="nmcnativeTargetPlaylist" hidden aria-hidden="true">
+                        <option value="">— 选择一个已有歌单 —</option>
+                </select>
                 <div class="nmcnative-actions">
                     <button id="nmcnativeRefreshPlaylists" type="button">刷新歌单列表</button>
                     <button id="nmcnativeUsePlaylist" class="nmcnative-primary" type="button">使用选中歌单</button>
@@ -2638,6 +3023,9 @@ function bindEvents() {
     element('nmcnativeTargetPlaylist').addEventListener('change', () => {
         updatePlaylistControls();
     });
+    element('nmcnativeTargetPlaylistSearch').addEventListener('input', () => {
+        renderTargetPlaylistChoices();
+    });
     element('nmcnativeRefreshPlaylists').addEventListener('click', () => {
         void withBusy('正在刷新歌单...', async () => {
             await refreshPlaylists();
@@ -2676,6 +3064,12 @@ function bindEvents() {
 
     element('nmcnativeRefreshPlayerPlaylists').addEventListener('click', () => {
         void withBusy('正在读取播放器歌单...', refreshPlayerPlaylists);
+    });
+    element('nmcnativePlayerPlaylistSearch').addEventListener('input', () => {
+        renderPlayerPlaylistChoices();
+    });
+    element('nmcnativePlayerTrackSearch').addEventListener('input', () => {
+        renderPlayerPlaylistTrackChoices();
     });
     element('nmcnativePlayerPlaylist').addEventListener('change', () => {
         if (element('nmcnativePlayerPlaylist')?.value) {

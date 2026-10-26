@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.6.0
+
+- Replaced the player playlist and track selectors with searchable playlist and
+  track lists.
+- Replaced the playlist-management target selector with the same browsable
+  playlist list while preserving the hidden compatibility controls.
+- Added playlist creator, track count, liked-list marker and selected-track
+  states, with bounded internal scrolling on desktop and mobile.
+
 ## 1.5.1
 
 - Stopped lyric progress updates from scrolling the SillyTavern page to the
