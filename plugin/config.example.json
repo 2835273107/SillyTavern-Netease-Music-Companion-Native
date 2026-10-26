@@ -1,0 +1,28 @@
+{
+  "api_base": "http://localhost:3000",
+  "accounts": {
+    "char_alt": {
+      "music_u": "",
+      "csrf": "",
+      "label": "char 小号",
+      "nickname": "",
+      "userId": "",
+      "currentPlaylist": {
+        "id": "",
+        "name": ""
+      }
+    }
+  },
+  "activeAccountId": "char_alt",
+  "user_netease_id": "",
+  "enableTogetherListen": false,
+  "togetherNative": {
+    "autoStart": false,
+    "pythonPath": "",
+    "appPath": "",
+    "debugPort": 9222,
+    "port": 3472,
+    "remoteUrl": "",
+    "remoteToken": ""
+  }
+}

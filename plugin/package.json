@@ -1,0 +1,17 @@
+{
+  "name": "sillytavern-netease-music-companion-native",
+  "version": "1.0.0",
+  "description": "Independent SillyTavern Netease Music Companion with a bundled native Listen Together service.",
+  "type": "module",
+  "main": "index.js",
+  "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/2835273107/SillyTavern-Netease-Music-Companion-Native.git"
+  },
+  "homepage": "https://github.com/2835273107/SillyTavern-Netease-Music-Companion-Native",
+  "engines": {
+    "node": ">=20"
+  }
+}

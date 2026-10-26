@@ -1,0 +1,20 @@
+# Runtime credentials and generated data
+config.json
+plugin/config.json
+*.log
+__pycache__/
+*.py[cod]
+
+# Local tooling
+node_modules/
+.env
+.env.*
+!.env.example
+.DS_Store
+Thumbs.db
+
+# Test and editor artifacts
+coverage/
+.idea/
+.vscode/
+*.tmp

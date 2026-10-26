@@ -1,0 +1,13 @@
+{
+  "name": "sillytavern-netease-music-companion-native-workspace",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test",
+    "check": "node --check index.js && node --check plugin/index.js && node --check plugin/together-bridge.js && node --check scripts/migrate-v1.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
