@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.5.1
+
+- Stopped lyric progress updates from scrolling the SillyTavern page to the
+  lyrics panel. Active-line highlighting and click-to-seek remain available.
+
 ## 1.5.0
 
 - Included the active character's primary and additional world books in

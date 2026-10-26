@@ -661,8 +661,6 @@ function syncPlayerLyrics() {
     container.querySelectorAll('.nmcnative-lyric-line').forEach((row, index) => {
         row.classList.toggle('active', index === nextIndex);
     });
-    const active = container.querySelector(`.nmcnative-lyric-line[data-index="${nextIndex}"]`);
-    active?.scrollIntoView({ block: 'center', behavior: 'smooth' });
 }
 
 async function loadPlayerSong(song, { autoplay = false, queue = null } = {}) {
