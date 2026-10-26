@@ -1052,10 +1052,3 @@ python3 -m py_compile plugin/together-native/service.py
 
 - ✅ 允许：个人使用、学习、研究、公益等非商业用途
 - ❌ 禁止：任何形式的商业使用，包括但不限于销售、付费服务、商业产品集成
-
-## License
-
-本项目采用 [PolyForm Noncommercial 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0/) 许可证。
-
-- ✅ 允许：个人使用、学习、研究、公益等非商业用途
-- ❌ 禁止：任何形式的商业使用，包括但不限于销售、付费服务、商业产品集成
