@@ -1287,6 +1287,7 @@ function renderTogetherReplyLog() {
         ].filter(Boolean).join(' ');
         log.append(row);
     }
+    updateMessageReplyAvailability();
 }
 
 function bindCharacterNameEvents() {
@@ -1346,11 +1347,17 @@ function selectedMessageContact() {
 }
 
 function updateMessageReplyAvailability() {
-    const button = element('nmcnativeGenerateTogetherReply');
-    if (button) {
-        button.disabled = state.busy
+    const generateButton = element('nmcnativeGenerateTogetherReply');
+    if (generateButton) {
+        generateButton.disabled = state.busy
             || !state.selectedMessageContactId
             || state.messageHistory.length === 0;
+    }
+    const resendButton = element('nmcnativeResendTogetherReply');
+    if (resendButton) {
+        resendButton.disabled = state.busy
+            || !state.selectedMessageContactId
+            || state.generatedTogetherReplies.length === 0;
     }
 }
 
@@ -1633,13 +1640,76 @@ async function speakCurrentSongToUser() {
     if (!content) {
         throw new Error(`${activeCharacterName()} 没有生成可发送的听歌短句`);
     }
-    await sendCharacterPrivateMessage(content, contact.id);
-    state.generatedTogetherReplies = [{ text: content, status: 'sent' }];
+    state.generatedTogetherReplies = [{ text: content, status: 'pending' }];
     renderTogetherReplyLog();
-    setText('nmcnativeCharComment', `${activeCharacterName()} 已私信：${content}`);
-    setMessage(`${activeCharacterName()} 已将听歌短句私信给 ${activeUserName()}。`, 'success');
-    setConnectionState(`${activeCharacterName()} 已私信听歌短句`, 'success');
-    return content;
+    try {
+        await sendCharacterPrivateMessage(content, contact.id);
+        state.generatedTogetherReplies[0].status = 'sent';
+        renderTogetherReplyLog();
+        setText('nmcnativeCharComment', `${activeCharacterName()} 已私信：${content}`);
+        setMessage(`${activeCharacterName()} 已将听歌短句私信给 ${activeUserName()}。`, 'success');
+        setConnectionState(`${activeCharacterName()} 已私信听歌短句`, 'success');
+        return content;
+    } catch (error) {
+        state.generatedTogetherReplies[0].status = 'failed';
+        state.generatedTogetherReplies[0].error = String(error?.message || error);
+        renderTogetherReplyLog();
+        setText('nmcnativeCharComment', `${activeCharacterName()} 的听歌短句尚未发送，可点击“重发最近生成内容”。`);
+        setMessage(`听歌短句发送失败：${error?.message || error}`, 'error');
+        setConnectionState(`${activeCharacterName()} 听歌短句发送失败`, 'warning');
+        return { content, error: String(error?.message || error) };
+    }
+}
+
+async function resendGeneratedTogetherMessage() {
+    const messages = state.generatedTogetherReplies
+        .map(reply => typeof reply === 'string' ? reply : reply.text)
+        .map(text => String(text || '').trim())
+        .filter(Boolean);
+    if (!messages.length) {
+        throw new Error('当前没有可重发的生成内容');
+    }
+    let contact = selectedMessageContact();
+    if (!contact) {
+        await refreshTogetherMessageContacts();
+        contact = selectedMessageContact();
+    }
+    if (!contact) {
+        throw new Error('请先选择要发送到的网易云私信联系人');
+    }
+    const characterName = activeCharacterName();
+    const content = messages.join('\n\n').slice(0, 500);
+    setConnectionState(`${characterName} 正在手动重发私信...`, 'loading');
+    try {
+        await sendCharacterPrivateMessage(content, contact.id);
+        const status = messages.length > 1 ? 'merged' : 'sent';
+        state.generatedTogetherReplies.forEach(reply => {
+            if (typeof reply === 'object') {
+                reply.status = status;
+                delete reply.error;
+            }
+        });
+        renderTogetherReplyLog();
+        setText('nmcnativeCharComment', `${characterName} 已重发：${content}`);
+        setMessage(
+            `${characterName} 已手动重发${messages.length > 1 ? ` ${messages.length} 段合并内容` : '生成内容'}。`,
+            'success',
+        );
+        setConnectionState(`${characterName} 已手动重发私信`, 'success');
+        return { messages, content };
+    } catch (error) {
+        state.generatedTogetherReplies.forEach(reply => {
+            if (typeof reply === 'object') {
+                reply.status = 'failed';
+                reply.error = String(error?.message || error);
+            }
+        });
+        renderTogetherReplyLog();
+        setText('nmcnativeCharComment', `${characterName} 的重发仍未成功，可稍后再试。`);
+        setMessage(`手动重发失败：${error?.message || error}`, 'error');
+        setConnectionState(`${characterName} 手动重发失败`, 'warning');
+        return { messages, content, error: String(error?.message || error) };
+    }
 }
 
 function renderRoomPlaylist(data) {
@@ -3415,8 +3485,9 @@ function panelHtml() {
                         <p class="nmcnative-list-empty">选择联系人后显示聊天记录</p>
                     </div>
                     <button id="nmcnativeGenerateTogetherReply" class="nmcnative-primary nmcnative-wide-button" type="button" data-nmcnative-char-template="让 {char} 回应并发送">让角色回应并发送</button>
+                    <button id="nmcnativeResendTogetherReply" class="nmcnative-wide-button" type="button" data-nmcnative-char-template="重发最近生成内容（{char}）" disabled>重发最近生成内容（角色）</button>
                     <div id="nmcnativeTogetherMessageLog" class="nmcnative-message-log" aria-live="polite"></div>
-                    <p class="nmcnative-note">网易云连续私信接口存在发送频率限制，因此多段内容会写入同一条消息，并保留空行分段。</p>
+                    <p class="nmcnative-note">网易云连续私信接口存在发送频率限制，因此多段内容会写入同一条消息，并保留空行分段。如果生成成功但网易云没有显示，可点击“重发最近生成内容”。</p>
                 </details>
             </section>
 
@@ -3737,6 +3808,9 @@ function bindEvents() {
     });
     element('nmcnativeGenerateTogetherReply').addEventListener('click', () => {
         void withBusy(`${activeCharacterName()} 正在回复...`, generateTogetherReply);
+    });
+    element('nmcnativeResendTogetherReply').addEventListener('click', () => {
+        void withBusy(`${activeCharacterName()} 正在重发私信...`, resendGeneratedTogetherMessage);
     });
     element('nmcnativeRefreshTogetherMessages').addEventListener('click', () => {
         void withBusy('正在刷新网易云聊天记录...', async () => {

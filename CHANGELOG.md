@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.8.2
+
+- Added a manual “resend last generated content” button for generated private
+  messages that do not appear in NetEase.
+- Preserved generated multi-paragraph or song-message content after a failed
+  send so it can be retried without regenerating.
+- Reused the selected NetEase contact and sent the original content unchanged.
+
 ## 1.8.1
 
 - Changed song recommendation reasons to direct `{{char}}`-to-`{{user}}`
