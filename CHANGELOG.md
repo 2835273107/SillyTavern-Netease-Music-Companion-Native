@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.5.0
+
+- Included the active character's primary and additional world books in
+  background song selection, comments, Listen Together narration and
+  conversation-tool generation, with a 6000-character context limit.
+- Simplified the player with a playlist/search source switch, inline source
+  controls and one focused now-playing area.
+- Collapsed comments, playback settings, room playlist, invitations and room
+  messages into optional detail panels.
+- Added a compact responsive visual refresh for desktop and mobile.
+
 ## 1.4.0
 
 - Changed song comments to be generated and published in the character's voice.
