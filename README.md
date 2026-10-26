@@ -1,61 +1,134 @@
 # SillyTavern Netease Music Companion Native
 
-Netease Music Companion Native 是面向 SillyTavern 的网易云音乐插件，包含多账号扫码登录、角色歌单生成、目标歌单管理和内置原生一起听服务。
+Netease Music Companion Native 是面向 SillyTavern 的网易云音乐插件，提供：
 
-Native 使用独立插件 ID、配置目录、环境变量和端口，可与旧版并行安装。原生一起听服务由本项目直接提供，不克隆、不启动、也不依赖第三方 MCP 服务。
+- 多账号与扫码登录
+- 角色歌单生成
+- 现有歌单读取和目标歌单管理
+- 新建歌单
+- 添加歌曲到当前歌单
+- 网易云原生「一起听」创建、邀请、心跳和关闭
+- 当前播放歌曲查询
+- 手机浏览器访问
+- Termux 本机访问
+- 云服务器 SillyTavern 远程调用家用电脑原生服务
 
-> 本项目是非官方第三方插件，与网易云音乐和 SillyTavern 官方均无隶属关系。
+插件后端包含自己的 `together-native/service.py`。原生一起听服务会组合使用本地 NeteaseCloudMusicApi 和网易云桌面客户端，不需要安装其他 MCP 项目。
 
-## 功能
+> 本项目是非官方第三方插件，与网易云音乐和 SillyTavern 官方均无隶属或背书关系。
 
-- 多账号管理，每个账号独立保存登录凭据、昵称和当前目标歌单。
-- 网易云 App 扫码登录。
-- 读取账号歌单并选择目标歌单。
-- 「新建歌单」：角色根据当前人设生成歌单名与搜索词，筛选后建单并加歌。
-- 「添加歌曲到当前歌单」：只加歌，不新建歌单，不改变当前目标。
-- 角色选歌使用 `generateQuietPrompt`，不写聊天历史，不触发普通回复。
-- 一起听本地逆向创建与邀请。
-- 内置原生服务：通过网易云桌面客户端创建房间、发送原生邀请、检查心跳并退出房间。
-- 接受新版分享链接、兼容旧版房间 ID。
-- 远程模式：Termux 或云服务器上的 SillyTavern 可调用家用电脑上的内置服务。
-- 面板可折叠，并记住展开状态。
-- 前端响应不包含 Cookie、Cookie UID 或远程服务 Token。
+## 目录
 
-## 与 V1 隔离
+- [运行结构](#运行结构)
+- [环境要求](#环境要求)
+- [电脑端安装](#电脑端安装)
+- [电脑端配置](#电脑端配置)
+- [首次登录](#首次登录)
+- [歌单功能](#歌单功能)
+- [电脑端一起听](#电脑端一起听)
+- [手机端使用](#手机端使用)
+- [Termux 使用](#termux-使用)
+- [云服务器 SillyTavern](#云服务器-sillytavern)
+- [家用电脑作为原生服务主机](#家用电脑作为原生服务主机)
+- [Tailscale 连接方式](#tailscale-连接方式)
+- [HTTPS 反向代理连接方式](#https-反向代理连接方式)
+- [多账号](#多账号)
+- [更新与卸载](#更新与卸载)
+- [安全说明](#安全说明)
+- [故障排查](#故障排查)
+- [开发检查](#开发检查)
 
-| 资源 | V1 | Native |
-| --- | --- | --- |
-| 后端 ID | `netease-music` | `netease-music-native` |
-| 前端目录 | `netease-music-companion` | `netease-music-companion-native` |
-| 后端目录 | `netease-music-companion` | `netease-music-companion-native` |
-| 设置键 | `neteaseMusicCompanion` | `neteaseMusicCompanionNative` |
-| DOM 前缀 | `nmc` | `nmcnative` |
-| 环境变量 | `NETEASE_*` | `NETEASE_NATIVE_*` |
-| 默认原生服务端口 | `3456` | `3472` |
+## 运行结构
 
-两个版本可以同时安装，不会覆盖彼此的配置或前端节点。
+```text
+浏览器 / 手机 / 云服务器
+          │
+          ▼
+SillyTavern :8000
+├─ 前端扩展
+└─ 服务端插件
+   ├─ 账号与扫码
+   ├─ 歌单与角色生成
+   └─ 原生一起听服务
+      ├─ NeteaseCloudMusicApi :3000
+      └─ 网易云桌面客户端
+         └─ CDP :9222，仅本机
+```
+
+原生服务需要同时访问：
+
+- NeteaseCloudMusicApi
+- 网易云桌面客户端
+- 桌面客户端的本机 CDP 端口
+
+因此原生服务必须运行在安装了网易云桌面客户端的 Windows 或 macOS 电脑上。
 
 ## 环境要求
 
-- SillyTavern `1.19.0` 或兼容版本。
-- Node.js `20+`。
-- [NeteaseCloudMusicApi](https://gitlab.com/Binaryify/NeteaseCloudMusicApi)，默认地址 `http://localhost:3000`。
-- 支持 Chat Completion 的主模型连接。
-- 使用内置原生一起听服务时：
-  - Python `3.9+`；
-  - Windows 或 macOS 上的网易云官方桌面客户端；
-  - 允许服务通过 CDP 启动或重启桌面客户端。
+### 所有部署方式
 
-插件不需要额外 npm 包，原生服务只使用 Python 标准库。
+- SillyTavern `1.19.0` 或兼容版本
+- Node.js `20+`
+- 支持 Chat Completion 的主模型连接
+- 本地或可访问的 NeteaseCloudMusicApi
 
-## 安装
+### 原生一起听服务
 
-### 一键安装
+- Python `3.9+`
+- Windows 或 macOS 网易云官方桌面客户端
+- 桌面客户端已登录网易云账号
+- 客户端可通过 CDP 启动
+
+### 手机端
+
+手机不需要 Node.js、Python 或桌面客户端也能打开浏览器页面。
+
+手机网易云 App 用于：
+
+- 扫码登录
+- 接受一起听邀请
+- 播放音乐
+
+云端或插件的原生服务不能代替用户点击手机 App 内的播放按钮。
+
+## 电脑端安装
+
+### 1. 启动 NeteaseCloudMusicApi
+
+准备一个 NeteaseCloudMusicApi 项目，并确认默认监听：
+
+```text
+http://localhost:3000
+```
+
+Windows PowerShell：
+
+```powershell
+cd "D:\path\to\NeteaseCloudMusicApi"
+npm install
+node app.js
+```
+
+macOS / Linux：
+
+```bash
+cd /path/to/NeteaseCloudMusicApi
+npm install
+node app.js
+```
+
+浏览器打开 `http://localhost:3000` 能访问即表示启动成功。
+
+如果 API 不在默认地址，稍后在插件配置中修改 `api_base`。
+
+### 2. 克隆插件
 
 ```bash
 git clone https://github.com/2835273107/SillyTavern-Netease-Music-Companion-Native.git
 cd SillyTavern-Netease-Music-Companion-Native
 ```
+
+### 3. 一键安装
 
 Windows：
 
@@ -63,26 +136,31 @@ Windows：
 pwsh -ExecutionPolicy Bypass -File .\install.ps1 -SillyTavernPath "D:\SillyTavern"
 ```
 
-Linux、macOS 或 Termux：
+macOS / Linux：
 
 ```bash
 chmod +x install.sh
 ./install.sh /path/to/SillyTavern
 ```
 
-安装器会复制：
+安装位置：
 
 ```text
-public/scripts/extensions/third-party/netease-music-companion-native/
-plugins/netease-music-companion-native/
-├── together-bridge.js
-└── together-native/
-    └── service.py
+SillyTavern/
+├─ public/scripts/extensions/third-party/
+│  └─ netease-music-companion-native/
+└─ plugins/
+   └─ netease-music-companion-native/
+      ├─ index.js
+      ├─ together-bridge.js
+      ├─ config.example.json
+      └─ together-native/
+         └─ service.py
 ```
 
-安装器不会下载第三方 MCP，也不会修改旧版目录。
+安装器会从 `config.example.json` 创建 `config.json`，已有配置不会被覆盖。
 
-### 启用服务端插件
+### 4. 启用 SillyTavern 服务端插件
 
 在 SillyTavern 的 `config.yaml` 中确认：
 
@@ -90,27 +168,31 @@ plugins/netease-music-companion-native/
 enableServerPlugins: true
 ```
 
-重启 SillyTavern。前端请求路径为：
+重启 SillyTavern。
+
+### 5. 打开插件
+
+进入：
+
+```text
+SillyTavern → 扩展程序 → Netease Music Companion Native
+```
+
+默认后端地址：
 
 ```text
 /api/plugins/netease-music-native
 ```
 
-## 从 V1 迁移
+## 电脑端配置
 
-```bash
-node scripts/migrate-v1.mjs /path/to/SillyTavern
+后端配置文件：
+
+```text
+SillyTavern/plugins/netease-music-companion-native/config.json
 ```
 
-全新安装生成的空白 Native 配置可以被自动替换。若 Native 中已有账号或远程服务设置，脚本会拒绝覆盖；确认要替换时：
-
-```bash
-node scripts/migrate-v1.mjs /path/to/SillyTavern --force
-```
-
-迁移会复制账号、Cookie、目标歌单和一起听设置。旧版兼容字段 `togetherPoc` 会转换为 Native 的 `togetherNative`；旧 POC 路径不会保留，因为 Native 使用内置服务。
-
-## 配置
+基础示例：
 
 ```json
 {
@@ -119,7 +201,7 @@ node scripts/migrate-v1.mjs /path/to/SillyTavern --force
     "default": {
       "music_u": "",
       "csrf": "",
-      "label": "默认账号",
+      "label": "默认角色账号",
       "nickname": "",
       "userId": "",
       "currentPlaylist": {
@@ -129,8 +211,8 @@ node scripts/migrate-v1.mjs /path/to/SillyTavern --force
     }
   },
   "activeAccountId": "default",
-  "user_netease_id": "",
-  "enableTogetherListen": false,
+  "user_netease_id": "接收邀请的网易云数字用户ID",
+  "enableTogetherListen": true,
   "togetherNative": {
     "autoStart": false,
     "pythonPath": "",
@@ -143,85 +225,365 @@ node scripts/migrate-v1.mjs /path/to/SillyTavern --force
 }
 ```
 
-| 字段 | 用途 |
+### 字段说明
+
+| 字段 | 说明 |
 | --- | --- |
 | `api_base` | NeteaseCloudMusicApi 地址 |
-| `accounts` | 独立账号配置 |
-| `activeAccountId` | 当前活动账号 |
 | `user_netease_id` | 接收原生一起听邀请的数字用户 ID |
-| `enableTogetherListen` | 启用一起听 |
-| `togetherNative.autoStart` | 酒馆启动时自动运行内置服务 |
-| `togetherNative.pythonPath` | Python 可执行文件 |
-| `togetherNative.appPath` | 网易云桌面客户端路径 |
-| `togetherNative.debugPort` | 客户端 CDP 端口 |
-| `togetherNative.port` | 内置 HTTP 服务端口，默认 `3472` |
-| `togetherNative.remoteUrl` | 远程内置服务地址；填写后不启动本地服务 |
-| `togetherNative.remoteToken` | 远程服务 Bearer Token |
+| `enableTogetherListen` | 是否启用一起听 |
+| `autoStart` | SillyTavern 启动时是否自动运行本地原生服务 |
+| `pythonPath` | Python 可执行文件；留空时使用 `python` 或 `python3` |
+| `appPath` | 网易云客户端路径；留空时自动探测常见位置 |
+| `debugPort` | 桌面客户端 CDP 端口，默认 `9222` |
+| `port` | 本地原生服务端口，默认 `3472` |
+| `remoteUrl` | 远程原生服务地址；填写后不启动本地服务 |
+| `remoteToken` | 远程原生服务 Bearer Token |
 
-Native 环境变量：
+### 指定 Python
 
-```text
-NETEASE_NATIVE_API_BASE
-NETEASE_NATIVE_MUSIC_U
-NETEASE_NATIVE_CSRF
-NETEASE_NATIVE_NATIVE_PYTHON
-NETEASE_NATIVE_NATIVE_CLIENT_PATH
-NETEASE_NATIVE_NATIVE_URL
-NETEASE_NATIVE_NATIVE_TOKEN
+如果系统找不到 Python，在配置中写完整路径。
+
+Windows 示例：
+
+```json
+{
+  "pythonPath": "C:\\Python312\\python.exe"
+}
 ```
 
-## 首次使用
+macOS 示例：
 
-1. 打开 SillyTavern → 扩展程序 → Netease Music Companion Native。
-2. 添加或选择账号。
-3. 点击「扫码登录」。
-4. 刷新歌单并选择目标歌单。
-5. 使用「新建歌单」或「添加歌曲到当前歌单」。
+```json
+{
+  "pythonPath": "/opt/homebrew/bin/python3"
+}
+```
 
-角色候选歌曲只来自本次搜索。搜索无合适结果时返回空选择，不使用当前歌单已有歌曲补位。
+### 指定网易云客户端
 
-## 一起听
+Windows 示例：
+
+```json
+{
+  "appPath": "D:\\CloudMusic\\cloudmusic.exe"
+}
+```
+
+macOS 通常不需要设置。
+
+### 自动启动
+
+测试成功后可以把：
+
+```json
+{
+  "autoStart": true
+}
+```
+
+设为 `true`。这样 SillyTavern 启动时会同时启动本地原生服务。
+
+即使 `autoStart=false`，在面板选择“独立原生服务”时也会按需启动。
+
+## 首次登录
+
+1. 打开插件面板。
+2. 使用默认账号，或点击“+ 添加账号”。
+3. 点击“扫码登录”。
+4. 使用网易云 App 扫码。
+5. 登录成功后点击“检查登录状态”。
+6. 确认账号昵称和当前账号显示正确。
+
+扫码结果会保存到后端 `config.json`。浏览器不会读取 Cookie 原文。
+
+## 歌单功能
+
+### 选择目标歌单
+
+1. 点击“刷新歌单列表”。
+2. 从下拉框选择目标歌单。
+3. 点击“使用选中歌单”。
+
+只读歌单不会修改网易云数据。
+
+### 新建歌单
+
+点击“新建歌单”后：
+
+1. 角色根据当前人设生成歌单名和搜索词。
+2. 插件搜索候选歌曲。
+3. 角色从候选中选择歌曲并给出理由。
+4. 创建新歌单。
+5. 添加歌曲。
+6. 将新歌单设为当前目标歌单。
+
+### 添加歌曲到当前歌单
+
+点击“添加歌曲到当前歌单”后：
+
+1. 使用当前选中的目标歌单。
+2. 角色搜索并选择新歌曲。
+3. 只添加歌曲。
+4. 不新建歌单，不改变当前目标。
+
+候选歌曲只来自本次搜索。搜索结果不合适时不会从已有歌单中补歌。
+
+## 电脑端一起听
+
+### 前置条件
+
+- `enableTogetherListen: true`
+- 已填写 `user_netease_id`
+- 插件当前账号已登录
+- NeteaseCloudMusicApi 已启动
+- Python 可用
+- 网易云桌面客户端已登录同一账号
+
+### 创建房间
+
+1. 打开“一起听”。
+2. 创建方式选择“独立原生服务”。
+3. 点击“创建房间”。
+4. 等待状态显示服务已连接。
+5. 创建成功后页面会显示房间和邀请链接。
+
+原生服务执行流程：
+
+1. 通过 NeteaseCloudMusicApi 创建服务端房间。
+2. 读取服务端返回的完整 `roomInfo`。
+3. 将 `roomInfo` 交给网易云桌面客户端激活。
+4. 等待客户端进入活跃房间状态。
+5. 启动客户端心跳。
+6. 向 `user_netease_id` 发送原生邀请。
+7. 返回房间 ID、当前歌曲和分享链接。
+
+### 客户端 CDP
+
+Windows 客户端可能被服务以调试参数重启：
+
+```text
+--remote-debugging-port=9222
+--remote-allow-origins=*
+```
+
+CDP 只应监听本机，不要开放到公网。
+
+### 当前歌曲
+
+点击“刷新当前歌曲”后，插件会读取：
+
+- 歌曲名
+- 歌手
+- 专辑
+- 播放进度
+- 播放状态
+- 封面
+
+### 心脏与保活
+
+活跃房间由官方桌面客户端维持连接和心跳。服务会确认客户端处于活跃房间状态后才报告创建成功。
+
+### 关闭房间
+
+点击“离开房间”：
+
+1. 服务调用桌面客户端离开房间。
+2. 等待客户端 leave 回调。
+3. 清理可能残留的服务端房间。
+4. 必要时重启桌面客户端，清除内存中的旧房间和心跳状态。
+
+关闭后重新打开网易云客户端属于正常兜底行为。
+
+## 手机端使用
+
+手机端不需要单独安装前端 App。手机上使用浏览器访问 SillyTavern。
+
+### 同一 Wi-Fi 访问电脑
+
+1. 电脑上的 SillyTavern 已启动并监听网络。
+2. 电脑防火墙允许 `8000` 端口。
+3. 手机与电脑连接同一个 Wi-Fi。
+4. 手机浏览器打开：
+
+```text
+http://电脑局域网IP:8000/
+```
+
+5. 进入“扩展程序”，打开 Netease Music Companion Native。
+
+手机访问电脑时，原生服务继续运行在电脑上。
+
+### 手机接受邀请
+
+1. 在插件中填写手机网易云账号的数字用户 ID。
+2. 点击“创建房间”。
+3. 手机会收到网易云原生邀请。
+4. 在手机网易云 App 中接受邀请。
+5. 在手机 App 内播放歌曲。
+
+### 手机添加到主屏幕
+
+- iPhone / iPad：Safari → 分享 → 添加到主屏幕
+- Android：浏览器菜单 → 安装网页应用 / 添加到主屏幕
+
+这只是网页快捷方式，不是独立移动 App。
+
+### 手机端限制
+
+- 手机网易云 App 的播放按钮只能由手机上的 App 操作。
+- 云端服务不能绕过 Android 或 iOS 权限直接控制手机 App。
+- 二维码、歌单、账号和接受邀请可以在手机浏览器完成。
+- 原生房间创建需要运行桌面客户端的电脑。
+
+## Termux 使用
+
+Termux 可以运行 SillyTavern 前端和后端，但不能在本机启动受控的原生一起听服务，因为 Android 手机上没有可用的网易云 Windows/macOS 桌面客户端 CDP。
+
+### 安装
+
+```bash
+pkg update
+pkg install -y git nodejs python
+
+git clone https://github.com/2835273107/SillyTavern-Netease-Music-Companion-Native.git \
+  "$HOME/SillyTavern-Netease-Music-Companion-Native"
+
+cd "$HOME/SillyTavern-Netease-Music-Companion-Native"
+chmod +x install.sh
+./install.sh "$HOME/SillyTavern"
+```
+
+### 保持 Termux 运行
+
+```bash
+termux-wake-lock
+```
+
+然后启动 SillyTavern：
+
+```bash
+cd "$HOME/SillyTavern"
+node server.js
+```
+
+手机浏览器打开：
+
+```text
+http://127.0.0.1:8000/
+```
+
+### Termux 配置远程服务
+
+编辑：
+
+```text
+$HOME/SillyTavern/plugins/netease-music-companion-native/config.json
+```
 
 设置：
 
 ```json
 {
   "enableTogetherListen": true,
-  "user_netease_id": "接收方数字用户ID"
+  "user_netease_id": "接收邀请的网易云数字用户ID",
+  "togetherNative": {
+    "autoStart": false,
+    "remoteUrl": "http://电脑私有地址:3472",
+    "remoteToken": "与家用电脑服务相同的 Token"
+  }
 }
 ```
 
-### 本地逆向
+Termux 上的 SillyTavern 会请求家用电脑的原生服务，不启动手机本地 Python 一起听进程。
 
-沿用插件通过 NeteaseCloudMusicApi 调用一起听接口的兼容方式。该模式适合接受已有邀请或旧流程，但无法独立维持完整客户端心跳。
+## 云服务器 SillyTavern
 
-### 独立原生服务
-
-选择「独立原生服务」后，插件会：
-
-1. 启动内置 `together-native/service.py`。
-2. 通过本地 NeteaseCloudMusicApi 创建服务端房间并取得 `roomInfo`。
-3. 检查桌面客户端和 CDP，将 `roomInfo` 交给官方客户端激活。
-4. 确认客户端状态为 `waiting`/`togetherOwner` 且心跳已启动。
-5. 向 `user_netease_id` 发送原生邀请。
-6. 返回房间 ID 和分享链接。
-7. 退出时等待客户端 leave 回调，清理残留房间并重置客户端状态。
-
-Windows 客户端首次使用时，服务会以调试参数重启客户端。房间创建与心跳由官方桌面客户端维持。
-
-### 远程服务
+适合以下结构：
 
 ```text
-手机/云 SillyTavern
-        │ HTTPS 或可信私有网络
-        ▼
-家用电脑 service.py :3472
-        │ CDP :9222，仅本机
-        ▼
-网易云桌面客户端
+云服务器：SillyTavern
+    │
+    │ Tailscale / VPN / HTTPS
+    ▼
+家用电脑：原生服务 + 网易云桌面客户端
 ```
 
-家用电脑：
+云服务器负责：
+
+- 前端页面
+- 插件后端
+- 账号和歌单
+- 角色生成
+
+家用电脑负责：
+
+- 网易云桌面客户端
+- CDP
+- 原生房间创建
+- 心跳和客户端控制
+
+### 云端安装
+
+```bash
+git clone https://github.com/2835273107/SillyTavern-Netease-Music-Companion-Native.git
+cd SillyTavern-Netease-Music-Companion-Native
+chmod +x install.sh
+./install.sh /path/to/SillyTavern
+```
+
+### 云端配置
+
+```json
+{
+  "api_base": "http://127.0.0.1:3000",
+  "activeAccountId": "default",
+  "user_netease_id": "接收邀请的网易云数字用户ID",
+  "enableTogetherListen": true,
+  "togetherNative": {
+    "autoStart": false,
+    "remoteUrl": "http://100.x.y.z:3472",
+    "remoteToken": "与家用电脑服务相同的 Token"
+  }
+}
+```
+
+云端 `api_base` 指向云端自己的 NeteaseCloudMusicApi。
+
+家用电脑服务另有自己的：
+
+- `NETEASE_NATIVE_SERVICE_API_BASE`
+- `NETEASE_NATIVE_SERVICE_COOKIE`
+
+两边账号必须一致。
+
+### 云端安全
+
+- SillyTavern 应通过 HTTPS 或可信私有网络访问。
+- 不要将 NeteaseCloudMusicApi `3000` 暴露公网。
+- 不要将 CDP `9222` 暴露公网。
+- 原生服务 Token 必须使用强随机值。
+- 公网 `remoteUrl` 必须使用 HTTPS。
+
+## 家用电脑作为原生服务主机
+
+### 1. 启动 NeteaseCloudMusicApi
+
+家用电脑需要：
+
+```text
+http://127.0.0.1:3000
+```
+
+### 2. 打开原生服务目录
+
+```text
+SillyTavern/plugins/netease-music-companion-native/together-native
+```
+
+### 3. 设置环境变量
+
+Windows PowerShell：
 
 ```powershell
 $env:NETEASE_NATIVE_SERVICE_COOKIE = "MUSIC_U=你的值; __csrf=你的值"
@@ -230,97 +592,271 @@ $env:NETEASE_NATIVE_SERVICE_CLIENT_PATH = "D:\CloudMusic\cloudmusic.exe"
 $env:NETEASE_NATIVE_SERVICE_API_BASE = "http://127.0.0.1:3000"
 $env:NETEASE_NATIVE_SERVICE_HOST = "0.0.0.0"
 $env:NETEASE_NATIVE_SERVICE_PORT = "3472"
-$env:NETEASE_NATIVE_SERVICE_TOKEN = "至少32字节的随机值"
-python -B service.py
+$env:NETEASE_NATIVE_SERVICE_TOKEN = "至少32字节的随机Token"
+$env:NETEASE_NATIVE_SERVICE_CDP_PORT = "9222"
 ```
 
-Native 配置：
+macOS / Linux 示例：
+
+```bash
+export NETEASE_NATIVE_SERVICE_COOKIE='MUSIC_U=你的值; __csrf=你的值'
+export NETEASE_NATIVE_SERVICE_RECEIVER_ID='接收方数字用户ID'
+export NETEASE_NATIVE_SERVICE_API_BASE='http://127.0.0.1:3000'
+export NETEASE_NATIVE_SERVICE_HOST='0.0.0.0'
+export NETEASE_NATIVE_SERVICE_PORT='3472'
+export NETEASE_NATIVE_SERVICE_TOKEN='至少32字节的随机Token'
+export NETEASE_NATIVE_SERVICE_CDP_PORT='9222'
+```
+
+macOS 客户端路径通常自动探测。
+
+### 4. 启动服务
+
+```bash
+python3 -B service.py
+```
+
+如果使用虚拟环境或指定 Python：
+
+```bash
+/absolute/path/to/python -B service.py
+```
+
+看到以下内容表示服务已监听：
+
+```text
+[netease-companion-native] listening on http://0.0.0.0:3472
+```
+
+### 5. 健康检查
+
+```text
+http://127.0.0.1:3472/health
+```
+
+`/health` 不需要 Token；其他接口都需要：
+
+```text
+Authorization: Bearer <NETEASE_NATIVE_SERVICE_TOKEN>
+```
+
+## Tailscale 连接方式
+
+推荐手机、Termux 或云服务器使用 Tailscale 连接家用电脑。
+
+### 安装
+
+在家用电脑和客户端设备上安装 Tailscale，并登录同一个 tailnet。
+
+### 查看家用电脑地址
+
+```bash
+tailscale ip -4
+```
+
+通常类似：
+
+```text
+100.x.y.z
+```
+
+### 家用电脑监听
+
+可使用：
+
+```text
+NETEASE_NATIVE_SERVICE_HOST=0.0.0.0
+```
+
+并用 Windows 防火墙限制到 Tailscale 网络。
+
+### 云端或 Termux 配置
 
 ```json
 {
-  "togetherNative": {
-    "autoStart": false,
-    "remoteUrl": "http://100.x.y.z:3472",
-    "remoteToken": "与 NETEASE_NATIVE_SERVICE_TOKEN 相同"
-  }
+  "remoteUrl": "http://100.x.y.z:3472"
 }
 ```
 
-- 同一 Wi-Fi：`http://电脑局域网IP:3472`
-- Tailscale：`http://电脑的100.x.y.z:3472`
-- 公网：必须使用 HTTPS 反向代理或受控隧道
+HTTP 允许 Tailscale `100.64.0.0/10` 地址。
 
-明文 HTTP 仅允许 localhost、私有网段、IPv6 ULA、链路本地地址和 Tailscale `100.64.0.0/10`。
+## HTTPS 反向代理连接方式
 
-远程服务不会收到 SillyTavern 本地的 NetEase Cookie。它使用自身 `NETEASE_NATIVE_SERVICE_COOKIE`，并返回脱敏的 Cookie 账号 ID 供插件比对。
+如果无法使用 Tailscale，可在公网使用 HTTPS 反向代理或受控隧道。
 
-## 手机和云端
+推荐：
 
-扫码、多账号、歌单和接受已有邀请不需要桌面客户端。
+```text
+互联网
+  │ HTTPS
+  ▼
+反向代理 / 隧道
+  │ HTTP，仅本机
+  ▼
+NETEASE_NATIVE_SERVICE_HOST=127.0.0.1
+NETEASE_NATIVE_SERVICE_PORT=3472
+```
 
-云服务器无法直接点击手机网易云 App 内的按钮。手机负责接受邀请；电脑上的内置服务负责创建并维持桌面客户端房间。云服务器无法直接访问家庭局域网时，可使用 Tailscale、VPN 或 HTTPS 隧道。
+插件配置：
+
+```json
+{
+  "remoteUrl": "https://music-service.example.com"
+}
+```
+
+要求：
+
+- 必须使用 HTTPS
+- 必须保留 Bearer Token
+- 反向代理应配置访问日志脱敏
+- 不要把 `3472` 无 TLS 直接暴露
+- 不要把 `3000` 或 `9222` 暴露
 
 ## 多账号
 
-- 每个插件账号独立保存 Cookie 和当前歌单。
-- 一次只运行一个本地内置服务。
-- 切换活动账号会停止旧服务。
-- 远程服务需要运维者为不同账号分别启动实例并使用不同端口和 Token。
+每个原生服务实例对应一个：
 
-## 安全
+- 网易云 Cookie
+- 桌面客户端账号
+- 服务端口
+- Bearer Token
 
-- Cookie 只保存在后端配置中。
-- `config.json` 已被 `.gitignore` 排除。
-- 服务除 `/health` 外都要求 Bearer Token。
-- 公网远程地址强制 HTTPS。
-- 客户端 CDP 只接受本机 WebSocket。
-- 服务不记录请求头、Cookie 或邀请链接。
-- 本地服务随 SillyTavern 退出。
+多账号示例：
 
-详见 [SECURITY.md](SECURITY.md)。
+| 账号 | 端口 | Token | remoteUrl |
+| --- | --- | --- | --- |
+| 账号 A | `3472` | Token A | `http://host:3472` |
+| 账号 B | `3473` | Token B | `http://host:3473` |
 
-## 常见问题
+切换账号时，需要让 `remoteUrl` 和 `remoteToken` 对应到同一账号实例。
 
-### 面板没有出现
+一个桌面客户端不能同时维持多个账号的原生房间。
 
-确认前端位于 `netease-music-companion-native/`，然后重启酒馆并强制刷新浏览器。
+## 更新与卸载
+
+### 更新
+
+```bash
+cd SillyTavern-Netease-Music-Companion-Native
+git pull
+```
+
+然后重新运行安装脚本。`config.json` 会保留。
+
+Windows：
+
+```powershell
+pwsh -ExecutionPolicy Bypass -File .\install.ps1 -SillyTavernPath "D:\SillyTavern"
+```
+
+macOS / Linux：
+
+```bash
+./install.sh /path/to/SillyTavern
+```
+
+重启 SillyTavern。
+
+### 卸载
+
+删除：
+
+```text
+SillyTavern/plugins/netease-music-companion-native
+SillyTavern/public/scripts/extensions/third-party/netease-music-companion-native
+```
+
+然后在 SillyTavern 设置中移除对应扩展。
+
+## 安全说明
+
+- `config.json` 包含网易云登录凭据，不要上传或分享。
+- Token 只保存在后端配置中。
+- 前端不会收到 Cookie 或远程 Token。
+- 本地原生服务默认只监听 `127.0.0.1`。
+- 远程服务除 `/health` 外都要求 Bearer Token。
+- 公网连接必须 HTTPS。
+- CDP 只接受本机 WebSocket。
+- 服务不会在日志中记录 Cookie、私密房间 ID 或完整邀请链接。
+- 离开房间时可能重启网易云客户端以清除残留状态。
+
+## 故障排查
+
+### 插件未出现
+
+- 确认前端位于 `netease-music-companion-native`。
+- 确认 `manifest.json` 和 `index.js` 存在。
+- 重启 SillyTavern。
+- 强制刷新浏览器。
 
 ### 后端 404
 
-确认后端 `info.id` 为 `netease-music-native`，文件位于 `plugins/netease-music-companion-native/`。
+- 确认后端 ID 是 `netease-music-native`。
+- 确认文件位于 `plugins/netease-music-companion-native`。
+- 确认 `enableServerPlugins: true`。
 
-### 独立原生服务未启动
+### NeteaseCloudMusicApi 连接失败
 
-检查 Python 路径、`together-native/service.py`、客户端路径和 `3472` 端口。
+- 确认 `http://127.0.0.1:3000` 可访问。
+- 检查 `api_base`。
+- 查看 NeteaseCloudMusicApi 控制台。
+
+### Python 服务未启动
+
+- 执行 `python3 --version`。
+- 在 `pythonPath` 中填写完整路径。
+- 检查 `together-native/service.py` 是否存在。
+- 检查 `3472` 是否被占用。
 
 ### 客户端账号不一致
 
-插件活动账号、配置 Cookie 和网易云桌面客户端必须登录同一个账号。
+以下三处必须使用同一个网易云账号：
+
+- 插件活动账号
+- 服务环境变量中的 Cookie
+- 桌面客户端登录账号
+
+### 创建房间超时
+
+- 确认网易云桌面客户端已登录。
+- 尝试完全退出并重新打开客户端。
+- 检查 `9222` 是否为本机 CDP 端口。
+- 检查 Python 服务是否能读取客户端状态。
+
+### 有房间但没有分享链接
+
+- 原生服务需要房间 ID、创建者 ID 和当前歌曲 ID。
+- 先确认桌面客户端正在播放歌曲。
+- 重新创建房间。
+
+### 关闭房间后客户端重启
+
+这是清理旧房间和心跳状态的兜底机制，属于正常行为。
 
 ### 远程服务无法连接
 
-检查 `remoteUrl`、`remoteToken`、防火墙和服务进程。公网只允许 HTTPS，Tailscale 地址通常以 `100.` 开头。
+- 检查 `remoteUrl` 和 `remoteToken`。
+- 检查家用电脑防火墙。
+- 尝试访问 `/health`。
+- Tailscale 地址应以 `100.` 开头。
+- 公网必须使用 HTTPS。
 
-### 邀请链接 404
+### 手机无法访问电脑
 
-使用完整官方分享参数：
+- 确认手机与电脑在同一网络。
+- 检查电脑防火墙是否允许 `8000`。
+- 确认 SillyTavern 监听网络接口。
+- 不要使用电脑上的 `127.0.0.1` 作为手机访问地址。
 
-```text
-https://st.music.163.com/listen-together/share/index.html?roomId=...&inviterId=...&songId=...
-```
-
-## 开发
+## 开发检查
 
 ```bash
 npm test
 npm run check
-python -m py_compile plugin/together-native/service.py
+python3 -m py_compile plugin/together-native/service.py
 ```
-
-架构说明见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 
 ## 许可
 
-本项目使用 MIT License。原生服务的实现和 HTTP 接口由本项目维护；运行时不需要安装第三方 MCP。
-
-协议兼容研究阶段的鸣谢见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+本项目使用 MIT License。
