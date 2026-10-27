@@ -16,6 +16,7 @@ const CANDIDATE_GUARD = '候选歌曲只能来自本次搜索接口返回的结�
 const TOGETHER_REPLY_CHAR_LIMIT = 60;
 const SPEAK_SONG_CHAR_LIMIT = 80;
 const SONG_COMMENT_CHAR_LIMIT = 120;
+const SONG_COMMENT_SENTENCE_OVERFLOW = 20;
 const REASONING_TAG_NAMES = 'thinking|think|analysis|reasoning|scratchpad';
 
 const state = {
@@ -145,21 +146,39 @@ function sanitizeGeneratedText(value) {
     return text.trim();
 }
 
-function truncateGeneratedText(value, limit) {
+function truncateGeneratedText(value, limit, {
+    sentenceOverflow = 0,
+    clauseFallback = false,
+} = {}) {
     const text = sanitizeGeneratedText(value);
     const maxLength = Math.max(1, Number(limit) || 1);
     if (text.length <= maxLength) {
         return text;
     }
-    const head = text.slice(0, maxLength);
-    let cut = 0;
-    for (const match of head.matchAll(/[。！？!?…]+[”’"'」』）】]*|[；;]/g)) {
-        cut = match.index + match[0].length;
+    const hardLength = Math.min(
+        text.length,
+        maxLength + Math.max(0, Number(sentenceOverflow) || 0),
+    );
+    const head = text.slice(0, hardLength);
+    const sentenceCuts = [...head.matchAll(/[。！？!?…]+[”’"'」』）】]*|[；;]/g)]
+        .map(match => match.index + match[0].length);
+    const overflowCut = sentenceCuts.find(cut => cut >= maxLength);
+    if (overflowCut) {
+        return head.slice(0, overflowCut).trim();
     }
-    if (cut >= Math.min(30, maxLength * 0.4)) {
-        return head.slice(0, cut).trim();
+    const lastSentenceCut = sentenceCuts.at(-1) || 0;
+    if (lastSentenceCut >= Math.min(30, maxLength * 0.6)) {
+        return head.slice(0, lastSentenceCut).trim();
     }
-    return head.trim();
+    if (clauseFallback) {
+        const clauseCuts = [...head.matchAll(/[，,、：:]/g)]
+            .map(match => match.index);
+        const clauseCut = clauseCuts.at(-1) || 0;
+        if (clauseCut >= maxLength * 0.6) {
+            return `${head.slice(0, clauseCut).trim()}。`;
+        }
+    }
+    return text.slice(0, maxLength).trim();
 }
 
 function backendBase() {
@@ -2389,7 +2408,10 @@ async function postSongComment(songId, content) {
     if (state.commentingSongIds.has(commentKey)) {
         throw new Error('这首歌正在发布评论，请稍候');
     }
-    const normalizedContent = truncateGeneratedText(content, SONG_COMMENT_CHAR_LIMIT)
+    const normalizedContent = truncateGeneratedText(content, SONG_COMMENT_CHAR_LIMIT, {
+        sentenceOverflow: SONG_COMMENT_SENTENCE_OVERFLOW,
+        clauseFallback: true,
+    })
         .replace(/\s+/g, ' ')
         .trim();
     if (!normalizedContent) {

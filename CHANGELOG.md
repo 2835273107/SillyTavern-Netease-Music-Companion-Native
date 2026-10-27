@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.12.5
+
+- Changed comment shortening to allow up to 20 additional characters when needed
+  to finish the current sentence.
+- Added punctuation-aware fallback so comments no longer collapse to a very
+  short fragment when the next sentence ends just beyond the target length.
+
 ## 1.12.4
 
 - Removed model-generated HTML, style attributes, entities and truncated markup
