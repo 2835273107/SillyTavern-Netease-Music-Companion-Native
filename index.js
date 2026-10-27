@@ -16,6 +16,7 @@ const CANDIDATE_GUARD = '候选歌曲只能来自本次搜索接口返回的结�
 const TOGETHER_REPLY_CHAR_LIMIT = 60;
 const SPEAK_SONG_CHAR_LIMIT = 80;
 const SONG_COMMENT_CHAR_LIMIT = 120;
+const REASONING_TAG_NAMES = 'thinking|think|analysis|reasoning|scratchpad';
 
 const state = {
     accounts: [],
@@ -94,6 +95,32 @@ function initializeSettings() {
 
 function privateGenerationLyricsEnabled() {
     return extension_settings[EXTENSION_KEY]?.includeTogetherLyrics !== false;
+}
+
+function stripReasoningArtifacts(value) {
+    let text = String(value || '').replace(/\r\n?/g, '\n');
+    text = text
+        .replace(
+            /<!--\s*(?:START|BEGIN):?\s*THINKING\s*-->[\s\S]*?<!--\s*(?:END|STOP):?\s*THINKING\s*-->/gi,
+            '',
+        )
+        .replace(
+            /<!--\s*(?:START|BEGIN):?\s*THINKING\s*-->[\s\S]*$/gi,
+            '',
+        )
+        .replace(
+            new RegExp(`<(${REASONING_TAG_NAMES})\\b[^>]*>[\\s\\S]*?<\\/\\1>\\s*`, 'gi'),
+            '',
+        )
+        .replace(
+            new RegExp(`<(${REASONING_TAG_NAMES})\\b[^>]*>[\\s\\S]*$`, 'gi'),
+            '',
+        )
+        .replace(
+            new RegExp(`<\\/?(?:${REASONING_TAG_NAMES})\\b[^>]*>`, 'gi'),
+            '',
+        );
+    return text.trim();
 }
 
 function backendBase() {
@@ -2321,7 +2348,7 @@ async function postSongComment(songId, content) {
     if (state.commentingSongIds.has(commentKey)) {
         throw new Error('这首歌正在发布评论，请稍候');
     }
-    const normalizedContent = String(content || '')
+    const normalizedContent = stripReasoningArtifacts(content)
         .replace(/\s+/g, ' ')
         .trim()
         .slice(0, SONG_COMMENT_CHAR_LIMIT);
@@ -2783,7 +2810,7 @@ function extractFirstJsonValue(text) {
 }
 
 function parseJsonReply(text) {
-    const raw = String(text || '').trim();
+    const raw = stripReasoningArtifacts(text);
     const withoutFence = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
     const candidates = [withoutFence, extractFirstJsonValue(withoutFence)];
     for (const candidate of candidates) {
@@ -2894,7 +2921,10 @@ async function quiet(prompt, {
         ? `当前 SillyTavern 预设是“${presetName}”。严格沿用该预设的语言、人称、角色口吻、格式和可用上下文规则，再完成下面的具体任务。`
         : '严格沿用当前 SillyTavern 预设的语言、人称、角色口吻、格式和可用上下文规则，再完成下面的具体任务。';
     const basePrompt = [worldbook, presetGuard, prompt].filter(Boolean).join('\n\n');
-    const prepared = substituteParams(candidateGuard ? `${basePrompt}\n\n${CANDIDATE_GUARD}` : basePrompt);
+    const outputGuard = '这是后台生成任务。只输出本次任务要求的最终结果，禁止输出 <thinking>、<analysis>、<reasoning>、思维链、分析过程或草稿。';
+    const prepared = substituteParams(
+        `${basePrompt}\n\n${outputGuard}${candidateGuard ? `\n\n${CANDIDATE_GUARD}` : ''}`,
+    );
     const options = {
         quietPrompt: prepared,
         quietName: activeCharacterName(),
@@ -2916,7 +2946,7 @@ async function quiet(prompt, {
                 'nmcnativeSecondaryAiStatus',
                 `已启用 · ${result.model || state.secondaryAiConfig.model} · 调用成功`,
             );
-            return String(result.text || '').trim();
+            return stripReasoningArtifacts(result.text);
         } catch (error) {
             setText(
                 'nmcnativeSecondaryAiStatus',
@@ -2925,7 +2955,7 @@ async function quiet(prompt, {
         }
     }
     const result = await generateQuietPrompt(options);
-    return String(result || '').trim();
+    return stripReasoningArtifacts(result);
 }
 
 async function generatePersonaPlan({ withName = true } = {}) {

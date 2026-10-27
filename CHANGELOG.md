@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.12.2
+
+- Stripped `<thinking>`, `<analysis>`, `<reasoning>` and similar hidden blocks
+  from every plugin background-generation result before parsing or truncation.
+- Added handling for unclosed reasoning blocks and preset thinking comments.
+- Prevented long reasoning blocks from filling or leaking into the 120-character
+  song-comment limit.
+
 ## 1.12.1
 
 - Made quiet-generation JSON parsing extract the first complete JSON object or
