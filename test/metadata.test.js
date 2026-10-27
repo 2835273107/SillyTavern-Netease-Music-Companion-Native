@@ -15,9 +15,9 @@ test('keeps manifest, package and config on the native namespace', () => {
     const backend = read('plugin/index.js');
     const service = read('plugin/together-native/service.py');
 
-    assert.equal(manifest.version, '1.9.2');
+    assert.equal(manifest.version, '1.10.0');
     assert.equal(manifest.homePage.endsWith('SillyTavern-Netease-Music-Companion-Native'), true);
-    assert.equal(packageJson.version, '1.9.2');
+    assert.equal(packageJson.version, '1.10.0');
     assert.match(frontend, /nmcnativePlayerLyrics/);
     assert.match(backend, /\/song-audio\/:songId/);
     assert.match(backend, /\/together\/send-message/);
@@ -52,6 +52,11 @@ test('keeps manifest, package and config on the native namespace', () => {
     assert.match(frontend, /renderRoomPlaylistChoices/);
     assert.match(service, /playing\.curPlaying/);
     assert.match(service, /SERVICE_VERSION = "1\.2\.0"/);
+    assert.equal(config.neteaseApi.autoStart, true);
+    assert.match(backend, /ensureNeteaseApiService/);
+    assert.match(backend, /stopNeteaseApiService/);
+    assert.match(frontend, /neteaseApi\.managed|apiState\.managed/);
+    assert.equal(fs.existsSync(path.join(root, 'plugin/netease-api-runtime/package.json')), true);
     assert.doesNotMatch(frontend, /\.scrollIntoView\(/);
     assert.match(frontend, /data-nmcnative-tab/);
     assert.match(frontend, /ToolManager\.registerFunctionTool/);

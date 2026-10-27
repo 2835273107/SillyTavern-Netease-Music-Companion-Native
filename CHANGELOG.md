@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.10.0
+
+- Added managed NeteaseCloudMusicApi installation and automatic process
+  lifecycle.
+- Starts the local API with SillyTavern, waits for readiness, reuses an existing
+  external API and stops only plugin-owned processes on shutdown.
+- Supports custom API project paths while defaulting to the bundled npm runtime.
+- Exposes API management state to the frontend status line.
+
 ## 1.9.2
 
 - Read the desktop client's actual `curPlaying` song before waiting for the

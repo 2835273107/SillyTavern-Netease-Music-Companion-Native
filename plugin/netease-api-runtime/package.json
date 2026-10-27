@@ -1,0 +1,9 @@
+{
+  "name": "netease-music-companion-api-runtime",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Managed NeteaseCloudMusicApi runtime for the SillyTavern companion plugin.",
+  "dependencies": {
+    "NeteaseCloudMusicApi": "4.32.0"
+  }
+}

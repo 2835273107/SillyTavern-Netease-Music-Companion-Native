@@ -1,5 +1,12 @@
 {
   "api_base": "http://localhost:3000",
+  "neteaseApi": {
+    "autoStart": true,
+    "projectPath": "",
+    "entry": "",
+    "nodePath": "",
+    "startupTimeoutMs": 30000
+  },
   "accounts": {
     "char_alt": {
       "music_u": "",

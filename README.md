@@ -89,7 +89,7 @@ SillyTavern :8000
 - SillyTavern `1.19.0` 或兼容版本
 - Node.js `20+`
 - 支持 Chat Completion 的主模型连接
-- 本地或可访问的 NeteaseCloudMusicApi
+- 插件安装器会安装受管的 NeteaseCloudMusicApi；也可以连接你自己的本地或远程 API
 
 ### 原生一起听服务
 
@@ -112,33 +112,36 @@ SillyTavern :8000
 
 ## 电脑端安装
 
-### 1. 启动 NeteaseCloudMusicApi
+### 1. NeteaseCloudMusicApi
 
-准备一个 NeteaseCloudMusicApi 项目，并确认默认监听：
+默认不需要手动启动 API。安装器会在插件后端目录安装固定版本的受管运行时，SillyTavern 启动插件后自动运行并监听：
 
 ```text
-http://localhost:3000
+http://127.0.0.1:3000
 ```
 
-Windows PowerShell：
+- 安装器首次运行时会执行一次受管 API 的 `npm install`。
+- 插件初始化时自动启动 API，不需要再次运行 `node app.js`。
+- API 实际由插件启动时，SillyTavern 退出会同步关闭子进程。
+- 如果 `3000` 上已有你手动运行的 API，插件会复用它，并且不会擅自关闭。
+- 手机访问 SillyTavern 时使用的是同一个后端和同一个 `3000` 实例。
 
-```powershell
-cd "D:\path\to\NeteaseCloudMusicApi"
-npm install
-node app.js
+如果想使用自己的 NeteaseCloudMusicApi 项目，在 `config.json` 中填写：
+
+```json
+{
+  "neteaseApi": {
+    "autoStart": true,
+    "projectPath": "D:\\path\\to\\NeteaseCloudMusicApi"
+  }
+}
 ```
 
-macOS / Linux：
+受管运行时的默认位置：
 
-```bash
-cd /path/to/NeteaseCloudMusicApi
-npm install
-node app.js
+```text
+SillyTavern/plugins/netease-music-companion-native/netease-api-runtime/node_modules/NeteaseCloudMusicApi
 ```
-
-浏览器打开 `http://localhost:3000` 能访问即表示启动成功。
-
-如果 API 不在默认地址，稍后在插件配置中修改 `api_base`。
 
 ### 2. 克隆插件
 
@@ -173,11 +176,14 @@ SillyTavern/
       ├─ index.js
       ├─ together-bridge.js
       ├─ config.example.json
+      ├─ netease-api-runtime/
+      │  ├─ package.json
+      │  └─ node_modules/
       └─ together-native/
          └─ service.py
 ```
 
-安装器会从 `config.example.json` 创建 `config.json`，已有配置不会被覆盖。
+安装器会从 `config.example.json` 创建 `config.json`，已有配置不会被覆盖；首次安装还会准备受管的 NeteaseCloudMusicApi 运行时。
 
 ### 4. 启用 SillyTavern 服务端插件
 
@@ -216,6 +222,13 @@ SillyTavern/plugins/netease-music-companion-native/config.json
 ```json
 {
   "api_base": "http://localhost:3000",
+  "neteaseApi": {
+    "autoStart": true,
+    "projectPath": "",
+    "entry": "",
+    "nodePath": "",
+    "startupTimeoutMs": 30000
+  },
   "accounts": {
     "default": {
       "music_u": "",
@@ -249,6 +262,11 @@ SillyTavern/plugins/netease-music-companion-native/config.json
 | 字段 | 说明 |
 | --- | --- |
 | `api_base` | NeteaseCloudMusicApi 地址 |
+| `neteaseApi.autoStart` | SillyTavern 启动时自动运行 NeteaseCloudMusicApi |
+| `neteaseApi.projectPath` | 自有 API 项目目录；留空时优先使用受管运行时 |
+| `neteaseApi.entry` | 自有项目的入口文件；留空时自动查找 `app.js` 或 `server.js` |
+| `neteaseApi.nodePath` | 启动 API 使用的 Node.js；留空时使用 SillyTavern 当前 Node.js |
+| `neteaseApi.startupTimeoutMs` | 等待 API 就绪的最长时间 |
 | `user_netease_id` | 接收原生一起听邀请的数字用户 ID |
 | `enableTogetherListen` | 是否启用一起听 |
 | `autoStart` | SillyTavern 启动时是否自动运行本地原生服务 |
@@ -743,7 +761,7 @@ chmod +x install.sh
 }
 ```
 
-云端 `api_base` 指向云端自己的 NeteaseCloudMusicApi。
+云端 `api_base` 指向云端自己由插件自动管理的 NeteaseCloudMusicApi。
 
 家用电脑服务另有自己的：
 
@@ -762,13 +780,15 @@ chmod +x install.sh
 
 ## 家用电脑作为原生服务主机
 
-### 1. 启动 NeteaseCloudMusicApi
+### 1. NeteaseCloudMusicApi
 
 家用电脑需要：
 
 ```text
 http://127.0.0.1:3000
 ```
+
+家用电脑上的 SillyTavern 插件会自动启动受管 API；不需要另外打开终端运行 `node app.js`。
 
 ### 2. 打开原生服务目录
 
@@ -995,7 +1015,9 @@ SillyTavern/public/scripts/extensions/third-party/netease-music-companion-native
 
 - 确认 `http://127.0.0.1:3000` 可访问。
 - 检查 `api_base`。
-- 查看 NeteaseCloudMusicApi 控制台。
+- 确认 `config.json` 中 `neteaseApi.autoStart` 为 `true`。
+- 检查 `netease-api-runtime/node_modules/NeteaseCloudMusicApi/app.js` 是否存在；缺失时重新运行安装器。
+- 使用自有项目时检查 `neteaseApi.projectPath` 和 `neteaseApi.entry`。
 
 ### Python 服务未启动
 

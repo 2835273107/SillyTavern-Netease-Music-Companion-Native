@@ -1,2 +1,4 @@
 config.json
 config.json.tmp
+netease-api-runtime/node_modules/
+netease-api-runtime/package-lock.json

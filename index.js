@@ -512,7 +512,16 @@ async function refreshStatus({ silent = false } = {}) {
         renderTogetherVisibility();
         updateActiveLabel();
         updatePlaylistControls();
-        setConnectionState(status.message || '后端已连接', status.loggedIn ? 'success' : 'warning');
+        const apiState = status.neteaseApi || {};
+        const apiMessage = apiState.managed
+            ? '网易云 API 已由插件自动启动'
+            : apiState.autoStart
+                ? '网易云 API 自动管理已启用'
+                : '网易云 API 自动启动已关闭';
+        setConnectionState(
+            `${apiMessage} · ${status.message || '后端已连接'}`,
+            apiState.error ? 'warning' : status.loggedIn ? 'success' : 'warning',
+        );
         if (!silent) {
             setMessage(status.loggedIn ? '登录状态有效。' : status.message || '请选择一个账号并扫码登录。', status.loggedIn ? 'success' : 'info');
         }

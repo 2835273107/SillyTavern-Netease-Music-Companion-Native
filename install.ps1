@@ -31,6 +31,26 @@ Copy-Item -LiteralPath (Join-Path $source 'plugin\together-native\service.py') -
 Copy-Item -LiteralPath (Join-Path $source 'plugin\.gitignore') -Destination (Join-Path $backendTarget '.gitignore') -Force
 Copy-Item -LiteralPath (Join-Path $source 'README.md') -Destination (Join-Path $backendTarget 'README.md') -Force
 
+$apiRuntimeTarget = Join-Path $backendTarget 'netease-api-runtime'
+New-Item -ItemType Directory -Path $apiRuntimeTarget -Force | Out-Null
+Copy-Item -LiteralPath (Join-Path $source 'plugin\netease-api-runtime\package.json') -Destination (Join-Path $apiRuntimeTarget 'package.json') -Force
+
+$apiEntry = Join-Path $apiRuntimeTarget 'node_modules\NeteaseCloudMusicApi\app.js'
+if (-not (Test-Path -LiteralPath $apiEntry)) {
+    $npmCommand = Get-Command npm.cmd -ErrorAction Stop
+    Push-Location $apiRuntimeTarget
+    try {
+        & $npmCommand.Source install --omit=dev --ignore-scripts --no-audit --no-fund
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Failed to install the managed NeteaseCloudMusicApi runtime.'
+        }
+    } finally {
+        Pop-Location
+    }
+} else {
+    Write-Host 'Managed NeteaseCloudMusicApi runtime already installed.'
+}
+
 $configTarget = Join-Path $backendTarget 'config.json'
 if (-not (Test-Path -LiteralPath $configTarget)) {
     Copy-Item -LiteralPath (Join-Path $source 'plugin\config.example.json') -Destination $configTarget

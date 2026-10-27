@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
 import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { TogetherBridge } from './together-bridge.js';
@@ -22,6 +23,10 @@ let uidCache = new Map();
 let roomCache = new Map();
 const nativeBridge = new TogetherBridge();
 let shutdownHookBound = false;
+let apiProcess = null;
+let apiStartPromise = null;
+let apiStartedByPlugin = false;
+let apiLastError = '';
 
 class PublicError extends Error {
     constructor(message, status = 400) {
@@ -90,6 +95,188 @@ function normalizeApiBase(value) {
     parsed.search = '';
     parsed.hash = '';
     return parsed.toString().replace(/\/+$/, '');
+}
+
+function isLocalApiBase(apiBase = getApiBase()) {
+    try {
+        const hostname = new URL(apiBase).hostname.toLowerCase().replace(/^\[|\]$/g, '');
+        return ['localhost', '127.0.0.1', '::1'].includes(hostname);
+    } catch {
+        return false;
+    }
+}
+
+async function apiHealthCheck(apiBase = getApiBase(), timeoutMs = 1200) {
+    for (const route of ['/inner/version', '/']) {
+        try {
+            const response = await fetch(`${apiBase}${route}`, {
+                cache: 'no-store',
+                signal: AbortSignal.timeout(timeoutMs),
+            });
+            if (response.status < 500) {
+                return true;
+            }
+        } catch {
+            // Try the next lightweight route.
+        }
+    }
+    return false;
+}
+
+function resolveNeteaseApiEntry() {
+    const apiSettings = settings?.neteaseApi || {};
+    const configured = cleanText(
+        process.env.NETEASE_NATIVE_API_DIR || apiSettings.projectPath,
+        2000,
+    );
+    const managedEntry = path.join(
+        PLUGIN_DIR,
+        'netease-api-runtime',
+        'node_modules',
+        'NeteaseCloudMusicApi',
+        'app.js',
+    );
+    const commonDirectories = [
+        managedEntry,
+        path.join(PLUGIN_DIR, '..', '..', 'NeteaseCloudMusicApi'),
+        path.join(PLUGIN_DIR, '..', '..', 'netease-cloud-music-api'),
+        'D:\\NeteaseCloudMusicApi',
+        'D:\\netease-cloud-music-api',
+        'C:\\NeteaseCloudMusicApi',
+    ];
+    const candidates = [];
+    if (configured) {
+        const resolved = path.resolve(configured);
+        const configuredEntry = cleanText(apiSettings.entry, 500);
+        if (configuredEntry) {
+            candidates.push(path.resolve(resolved, configuredEntry));
+        }
+        if (resolved.toLowerCase().endsWith('.js')) {
+            candidates.push(resolved);
+        } else {
+            candidates.push(path.join(resolved, 'app.js'), path.join(resolved, 'server.js'));
+        }
+    }
+    candidates.push(...commonDirectories);
+    for (const candidate of candidates) {
+        try {
+            if (fs.statSync(candidate).isFile()) {
+                return {
+                    entry: candidate,
+                    cwd: path.dirname(candidate),
+                };
+            }
+        } catch {
+            // Keep looking.
+        }
+    }
+    return null;
+}
+
+function describeNeteaseApiService() {
+    return {
+        autoStart: settings?.neteaseApi?.autoStart === true,
+        managed: apiStartedByPlugin,
+        running: Boolean(apiProcess && !apiProcess.killed),
+        pid: apiProcess?.pid || null,
+        error: apiLastError,
+    };
+}
+
+async function ensureNeteaseApiService() {
+    const apiBase = getApiBase();
+    const apiSettings = settings?.neteaseApi || {};
+    if (!isLocalApiBase(apiBase) || apiSettings.autoStart !== true) {
+        return {
+            ...describeNeteaseApiService(),
+            ready: await apiHealthCheck(apiBase),
+        };
+    }
+    if (await apiHealthCheck(apiBase)) {
+        apiLastError = '';
+        return { ...describeNeteaseApiService(), ready: true, external: !apiStartedByPlugin };
+    }
+    if (apiStartPromise) {
+        return apiStartPromise;
+    }
+    apiStartPromise = (async () => {
+        const resolved = resolveNeteaseApiEntry();
+        if (!resolved) {
+            apiLastError = '未找到 NeteaseCloudMusicApi。请安装受管运行时，或在 config.json 的 neteaseApi.projectPath 中填写项目路径';
+            throw new PublicError(apiLastError, 503);
+        }
+        const url = new URL(apiBase);
+        const port = Number(url.port) || 3000;
+        const nodePath = cleanText(
+            process.env.NETEASE_NATIVE_NODE_PATH || apiSettings.nodePath,
+            2000,
+        ) || process.execPath;
+        apiLastError = '';
+        const child = spawn(nodePath, [resolved.entry], {
+            cwd: resolved.cwd,
+            env: {
+                ...process.env,
+                HOST: '127.0.0.1',
+                PORT: String(port),
+            },
+            stdio: 'ignore',
+            windowsHide: true,
+        });
+        apiProcess = child;
+        apiStartedByPlugin = true;
+        child.once('error', error => {
+            apiLastError = cleanText(error?.message, 500) || 'NeteaseCloudMusicApi 启动失败';
+            apiProcess = null;
+            apiStartedByPlugin = false;
+        });
+        child.once('exit', code => {
+            if (apiProcess === child) {
+                apiProcess = null;
+                apiStartedByPlugin = false;
+            }
+            if (code !== 0 && code !== null) {
+                apiLastError = `NeteaseCloudMusicApi 已退出（代码 ${code}）`;
+            }
+        });
+        const timeoutMs = Math.max(3000, Math.min(60000, Number(apiSettings.startupTimeoutMs) || 30000));
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+            if (await apiHealthCheck(apiBase, 700)) {
+                return { ...describeNeteaseApiService(), ready: true, external: false };
+            }
+            if (!apiProcess) {
+                break;
+            }
+            await new Promise(resolve => setTimeout(resolve, 300));
+        }
+        try {
+            child.kill();
+        } catch {
+            // Ignore process cleanup errors.
+        }
+        apiProcess = null;
+        apiStartedByPlugin = false;
+        apiLastError ||= `NeteaseCloudMusicApi 在 ${timeoutMs}ms 内未就绪`;
+        throw new PublicError(apiLastError, 503);
+    })().finally(() => {
+        apiStartPromise = null;
+    });
+    return apiStartPromise;
+}
+
+async function stopNeteaseApiService() {
+    apiStartPromise = null;
+    if (!apiProcess || !apiStartedByPlugin) {
+        return;
+    }
+    const child = apiProcess;
+    apiProcess = null;
+    apiStartedByPlugin = false;
+    try {
+        child.kill();
+    } catch {
+        // Ignore process cleanup errors.
+    }
 }
 
 function writeConfig() {
@@ -182,8 +369,30 @@ function loadAndNormalizeConfig() {
     if (raw.togetherPoc && !raw.togetherNative) {
         shouldWrite = true;
     }
+    const rawNeteaseApi = raw.neteaseApi && typeof raw.neteaseApi === 'object'
+        ? raw.neteaseApi
+        : {};
+    if (!raw.neteaseApi || typeof raw.neteaseApi !== 'object') {
+        shouldWrite = true;
+    }
     const normalized = {
         api_base: normalizeApiBase(raw.api_base),
+        neteaseApi: {
+            autoStart: rawNeteaseApi.autoStart !== false,
+            projectPath: cleanText(
+                process.env.NETEASE_NATIVE_API_DIR || rawNeteaseApi.projectPath,
+                2000,
+            ),
+            entry: cleanText(rawNeteaseApi.entry, 500),
+            nodePath: cleanText(
+                process.env.NETEASE_NATIVE_NODE_PATH || rawNeteaseApi.nodePath,
+                2000,
+            ),
+            startupTimeoutMs: Math.max(
+                3000,
+                Math.min(60000, Number(rawNeteaseApi.startupTimeoutMs) || 30000),
+            ),
+        },
         accounts,
         activeAccountId,
         user_netease_id: cleanText(raw.user_netease_id, 80),
@@ -269,8 +478,6 @@ function buildFixedUrl(endpoint, params = {}) {
 }
 
 async function requestNetease(endpoint, { method = 'GET', params = {}, cookie = '' } = {}) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
     try {
         const upperMethod = String(method).toUpperCase();
         const payload = { ...params };
@@ -279,15 +486,37 @@ async function requestNetease(endpoint, { method = 'GET', params = {}, cookie = 
         }
 
         const url = buildFixedUrl(endpoint, upperMethod === 'GET' ? payload : {});
-        const response = await fetch(url, {
+        const requestOptions = {
             method: upperMethod,
             headers: upperMethod === 'GET' ? { Accept: 'application/json' } : {
                 Accept: 'application/json',
                 'Content-Type': 'application/json',
             },
             body: upperMethod === 'GET' ? undefined : JSON.stringify(payload),
-            signal: controller.signal,
-        });
+            cache: 'no-store',
+            signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        };
+        if (apiStartPromise) {
+            await apiStartPromise.catch(() => {});
+        }
+        let response;
+        try {
+            response = await fetch(url, requestOptions);
+        } catch (firstError) {
+            if (
+                apiStartPromise
+                || ['TimeoutError', 'AbortError'].includes(firstError?.name)
+                || settings?.neteaseApi?.autoStart !== true
+                || !isLocalApiBase()
+            ) {
+                throw firstError;
+            }
+            await ensureNeteaseApiService();
+            response = await fetch(url, {
+                ...requestOptions,
+                signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+            });
+        }
 
         const text = await response.text();
         let body;
@@ -305,15 +534,13 @@ async function requestNetease(endpoint, { method = 'GET', params = {}, cookie = 
             : [];
         return { body, setCookies };
     } catch (error) {
-        if (error?.name === 'AbortError') {
+        if (['AbortError', 'TimeoutError'].includes(error?.name)) {
             throw new PublicError('NeteaseCloudMusicApi 请求超时', 504);
         }
         if (error instanceof PublicError) {
             throw error;
         }
-        throw new PublicError('无法连接 NeteaseCloudMusicApi，请确认服务已启动', 502);
-    } finally {
-        clearTimeout(timer);
+        throw new PublicError('无法连接 NeteaseCloudMusicApi，插件自动启动也未成功', 502);
     }
 }
 
@@ -992,11 +1219,17 @@ export async function init(router) {
 
     if (!shutdownHookBound) {
         shutdownHookBound = true;
-        const stopNative = () => {
+        const stopServices = () => {
+            void stopNeteaseApiService();
             void nativeBridge.stopService();
         };
-        process.once('SIGINT', stopNative);
-        process.once('SIGTERM', stopNative);
+        process.once('SIGINT', stopServices);
+        process.once('SIGTERM', stopServices);
+    }
+    if (settings.neteaseApi?.autoStart) {
+        void ensureNeteaseApiService().catch(error => {
+            console.warn('[netease-music-native] NeteaseCloudMusicApi auto-start failed:', error?.message || 'unknown error');
+        });
     }
     if (
         settings.enableTogetherListen
@@ -1203,6 +1436,7 @@ export async function init(router) {
             accountMode: 'alt',
             activeAccountId: accountId,
             accounts: publicAccounts(),
+            neteaseApi: describeNeteaseApiService(),
         });
     }));
 
@@ -2088,6 +2322,7 @@ export async function init(router) {
 }
 
 export async function exit() {
+    await stopNeteaseApiService();
     await nativeBridge.stopService();
     uidCache = new Map();
     roomCache = new Map();

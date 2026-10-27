@@ -27,6 +27,18 @@ cp "$source_dir/plugin/together-native/service.py" "$backend_target/together-nat
 cp "$source_dir/plugin/.gitignore" "$backend_target/.gitignore"
 cp "$source_dir/README.md" "$backend_target/README.md"
 
+api_runtime_target="$backend_target/netease-api-runtime"
+mkdir -p "$api_runtime_target"
+cp "$source_dir/plugin/netease-api-runtime/package.json" "$api_runtime_target/package.json"
+if [[ ! -f "$api_runtime_target/node_modules/NeteaseCloudMusicApi/app.js" ]]; then
+    (
+        cd "$api_runtime_target"
+        npm install --omit=dev --ignore-scripts --no-audit --no-fund
+    )
+else
+    echo "Managed NeteaseCloudMusicApi runtime already installed."
+fi
+
 if [[ ! -f "$backend_target/config.json" ]]; then
     cp "$source_dir/plugin/config.example.json" "$backend_target/config.json"
     chmod 600 "$backend_target/config.json" || true
