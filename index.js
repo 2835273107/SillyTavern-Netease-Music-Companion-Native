@@ -2743,19 +2743,60 @@ function startTogetherPolling({ pollNow = true } = {}) {
     }, 5000);
 }
 
+function extractFirstJsonValue(text) {
+    const source = String(text || '');
+    const start = source.search(/[\[{]/);
+    if (start < 0) {
+        return '';
+    }
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (let index = start; index < source.length; index += 1) {
+        const character = source[index];
+        if (inString) {
+            if (escaped) {
+                escaped = false;
+            } else if (character === '\\') {
+                escaped = true;
+            } else if (character === '"') {
+                inString = false;
+            }
+            continue;
+        }
+        if (character === '"') {
+            inString = true;
+            continue;
+        }
+        if (character === '{' || character === '[') {
+            depth += 1;
+            continue;
+        }
+        if (character === '}' || character === ']') {
+            depth -= 1;
+            if (depth === 0) {
+                return source.slice(start, index + 1);
+            }
+        }
+    }
+    return '';
+}
+
 function parseJsonReply(text) {
     const raw = String(text || '').trim();
     const withoutFence = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
-    try {
-        return JSON.parse(withoutFence);
-    } catch {
-        const start = withoutFence.indexOf('{');
-        const end = withoutFence.lastIndexOf('}');
-        if (start >= 0 && end > start) {
-            return JSON.parse(withoutFence.slice(start, end + 1));
+    const candidates = [withoutFence, extractFirstJsonValue(withoutFence)];
+    for (const candidate of candidates) {
+        if (!candidate) {
+            continue;
         }
-        throw new Error(`${activeCharacterName()} 返回的内容不是有效 JSON`);
+        try {
+            return JSON.parse(candidate);
+        } catch {
+            // Try the next narrower candidate.
+        }
     }
+    throw new Error(`${activeCharacterName()} 返回的内容不是有效 JSON`);
 }
 
 function characterWorldbookNames(character) {

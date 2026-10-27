@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.12.1
+
+- Made quiet-generation JSON parsing extract the first complete JSON object or
+  array instead of failing when a model appends a second JSON value or prose.
+- Replaced raw JSON syntax errors with a readable character-generation error.
+
 ## 1.12.0
 
 - Converted the in-Tavern player to click-to-play song lists with compact
