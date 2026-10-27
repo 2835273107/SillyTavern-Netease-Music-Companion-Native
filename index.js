@@ -30,6 +30,9 @@ const state = {
     loginPollToken: 0,
     togetherPollTimer: null,
     togetherPollFailures: 0,
+    messagePollTimer: null,
+    messagePollBusy: false,
+    messagePollTicks: 0,
     playerSong: null,
     playerSearchResults: [],
     playlists: [],
@@ -106,6 +109,11 @@ function activateTab(tab, { persist = true } = {}) {
     if (persist && extension_settings[EXTENSION_KEY]) {
         extension_settings[EXTENSION_KEY].activeTab = selected;
         saveSettingsDebounced();
+    }
+    if (selected === 'together') {
+        startMessagePolling();
+    } else {
+        stopMessagePolling();
     }
 }
 
@@ -627,6 +635,7 @@ function resetTogetherPanel() {
 }
 
 function resetTogetherMessageState() {
+    stopMessagePolling();
     state.messageContacts = [];
     state.selectedMessageContactId = '';
     state.messageHistory = [];
@@ -1549,6 +1558,55 @@ async function refreshTogetherMessageContacts() {
     return result;
 }
 
+function stopMessagePolling() {
+    if (state.messagePollTimer) {
+        clearInterval(state.messagePollTimer);
+        state.messagePollTimer = null;
+    }
+    state.messagePollBusy = false;
+    state.messagePollTicks = 0;
+}
+
+async function pollTogetherMessagesOnce() {
+    if (state.messagePollBusy || state.busy || !state.togetherEnabled) {
+        return;
+    }
+    const section = element('nmcnativeTogetherSection');
+    const details = element('nmcnativeTogetherReplyDetails');
+    if (!details?.open || section?.dataset.active !== 'true' || section?.hidden) {
+        return;
+    }
+    state.messagePollBusy = true;
+    try {
+        if (!state.selectedMessageContactId || state.messagePollTicks % 3 === 0) {
+            await refreshTogetherMessageContacts();
+        } else {
+            await loadTogetherMessageHistory(state.selectedMessageContactId);
+        }
+        state.messagePollTicks += 1;
+    } catch (error) {
+        setText(
+            'nmcnativeTogetherMessageState',
+            `自动刷新失败：${error?.message || error}`,
+        );
+    } finally {
+        state.messagePollBusy = false;
+    }
+}
+
+function startMessagePolling() {
+    stopMessagePolling();
+    const section = element('nmcnativeTogetherSection');
+    const details = element('nmcnativeTogetherReplyDetails');
+    if (!state.togetherEnabled || !details?.open || section?.dataset.active !== 'true') {
+        return;
+    }
+    void pollTogetherMessagesOnce();
+    state.messagePollTimer = setInterval(() => {
+        void pollTogetherMessagesOnce();
+    }, 4000);
+}
+
 function parseCharacterMessages(reply) {
     let values = [];
     try {
@@ -2168,8 +2226,12 @@ async function refreshTogetherState() {
     if (result.inRoom) {
         showInvite(result.roomId || '', result.inviteUrl || '');
         await refreshRoomPlaylist().catch(() => {});
+        if (extension_settings[EXTENSION_KEY]?.activeTab === 'together' && !state.togetherPollTimer) {
+            startTogetherPolling();
+        }
     } else {
         setText('nmcnativeTogetherRoom', '未加入房间');
+        stopTogetherPolling();
     }
 }
 
@@ -2208,27 +2270,56 @@ async function refreshNativeServiceState({ start = false } = {}) {
     }
 }
 
-async function pollTogetherSongOnce() {
+async function refreshCurrentTogetherSong({ startNative = false } = {}) {
+    const mode = element('nmcnativeTogetherMode')?.value || 'local';
+    const errors = [];
+    if (mode === 'native') {
+        try {
+            if (startNative) {
+                await api('/together/native/start', { method: 'POST', body: {} });
+            }
+            const song = await api('/together/native/now-playing');
+            renderTogetherSong(song);
+            state.togetherPollFailures = 0;
+            await refreshNativeServiceState().catch(() => {});
+            return song;
+        } catch (error) {
+            errors.push(`原生服务：${error?.message || error}`);
+        }
+    }
     try {
         const song = await api('/together/now-playing');
         renderTogetherSong(song);
         state.togetherPollFailures = 0;
+        return song;
+    } catch (error) {
+        errors.push(`本地逆向：${error?.message || error}`);
+    }
+    const message = errors.join('；');
+    setText('nmcnativeTogetherSong', `读取失败：${message}`);
+    throw new Error(message);
+}
+
+async function pollTogetherSongOnce() {
+    try {
+        await refreshCurrentTogetherSong();
     } catch (error) {
         state.togetherPollFailures += 1;
-        setMessage(error?.message || String(error), 'error');
-        if (state.togetherPollFailures >= 3) {
-            stopTogetherPolling();
+        if (state.togetherPollFailures === 1 || state.togetherPollFailures % 5 === 0) {
+            setMessage(error?.message || String(error), 'error');
         }
     }
 }
 
-function startTogetherPolling() {
+function startTogetherPolling({ pollNow = true } = {}) {
     stopTogetherPolling();
     const button = element('nmcnativeToggleSongPolling');
     if (button) {
-        button.textContent = '停止刷新歌曲';
+        button.textContent = '自动刷新中';
     }
-    void pollTogetherSongOnce();
+    if (pollNow) {
+        void pollTogetherSongOnce();
+    }
     state.togetherPollTimer = setInterval(() => {
         void pollTogetherSongOnce();
     }, 5000);
@@ -3310,26 +3401,146 @@ function injectStyles() {
             display: none !important;
         }
         @media (max-width: 700px) {
-            #netease-music-companion-native .nmcnative-grid,
+            #netease-music-companion-native {
+                max-width: 100%;
+                margin: 6px 0 10px;
+                padding: 8px;
+                overflow-x: hidden;
+                border-radius: 10px;
+            }
+            #netease-music-companion-native .inline-drawer-header {
+                gap: 7px;
+                padding: 1px 0;
+            }
+            #netease-music-companion-native h3 {
+                font-size: .96rem;
+            }
+            #netease-music-companion-native .nmcnative-kicker {
+                margin-top: 1px;
+                font-size: .72rem;
+            }
+            #netease-music-companion-native .nmcnative-header-tail {
+                gap: 8px;
+            }
+            #netease-music-companion-native .nmcnative-tabs {
+                grid-template-columns: repeat(4, minmax(0, 1fr));
+                gap: 2px;
+                margin-bottom: 8px;
+                padding: 2px;
+            }
+            #netease-music-companion-native .nmcnative-tab-button {
+                min-height: 38px;
+                padding: 4px 2px;
+                font-size: .72rem;
+                white-space: nowrap;
+            }
+            #netease-music-companion-native .nmcnative-section {
+                margin-top: 8px;
+                padding-top: 8px;
+            }
+            #netease-music-companion-native .nmcnative-section-title {
+                margin-bottom: 7px;
+                font-size: .86rem;
+            }
+            #netease-music-companion-native .nmcnative-grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
             #netease-music-companion-native .nmcnative-actions,
-            #netease-music-companion-native .nmcnative-toggle-grid,
+            #netease-music-companion-native .nmcnative-toggle-grid {
+                grid-template-columns: 1fr;
+            }
+            #netease-music-companion-native .nmcnative-actions {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+                gap: 6px;
+            }
             #netease-music-companion-native .nmcnative-row {
                 grid-template-columns: 1fr;
+                gap: 5px;
             }
             #netease-music-companion-native .nmcnative-row > button {
                 width: 100%;
             }
-            #netease-music-companion-native .nmcnative-tabs {
-                grid-template-columns: repeat(2, minmax(0, 1fr));
+            #netease-music-companion-native .nmcnative-field {
+                margin-bottom: 6px;
+            }
+            #netease-music-companion-native label {
+                font-size: .72rem;
+            }
+            #netease-music-companion-native select,
+            #netease-music-companion-native input {
+                min-height: 40px;
+                font-size: .86rem;
+            }
+            #netease-music-companion-native button {
+                min-height: 42px;
+                padding: 7px 5px;
+                font-size: .78rem;
+                touch-action: manipulation;
+            }
+            #netease-music-companion-native .nmcnative-source-switch {
+                margin-bottom: 8px;
+            }
+            #netease-music-companion-native .nmcnative-source-button {
+                min-height: 36px;
             }
             #netease-music-companion-native .nmcnative-now-playing {
-                padding: 9px;
+                padding: 8px;
+            }
+            #netease-music-companion-native audio {
+                display: block;
+                max-width: 100%;
+            }
+            #netease-music-companion-native .nmcnative-lyrics {
+                max-height: 200px;
+                padding: 6px;
+            }
+            #netease-music-companion-native .nmcnative-lyric-line {
+                padding: 5px 6px;
+            }
+            #netease-music-companion-native details.nmcnative-details > summary {
+                min-height: 40px;
+                padding: 9px 8px;
+                font-size: .78rem;
+            }
+            #netease-music-companion-native .nmcnative-chat-toolbar {
+                flex-wrap: wrap;
+                gap: 5px;
             }
             #netease-music-companion-native .nmcnative-contact-list {
-                max-height: 148px;
+                max-height: 116px;
+                overscroll-behavior: contain;
+            }
+            #netease-music-companion-native .nmcnative-contact-choice {
+                min-height: 40px;
             }
             #netease-music-companion-native .nmcnative-chat-history {
-                max-height: 280px;
+                max-height: 240px;
+                padding: 7px;
+                overscroll-behavior: contain;
+            }
+            #netease-music-companion-native .nmcnative-chat-bubble {
+                max-width: 94%;
+                padding: 6px 8px;
+            }
+            #netease-music-companion-native .nmcnative-chat-text {
+                font-size: .8rem;
+            }
+            #netease-music-companion-native .nmcnative-playlist-list,
+            #netease-music-companion-native .nmcnative-track-list {
+                max-height: 210px;
+                overscroll-behavior: contain;
+            }
+            #netease-music-companion-native .nmcnative-message-log,
+            #netease-music-companion-native .nmcnative-comments {
+                max-height: 160px;
+                overscroll-behavior: contain;
+            }
+            #netease-music-companion-native .nmcnative-note,
+            #netease-music-companion-native .nmcnative-status-line {
+                font-size: .74rem;
+            }
+            #netease-music-companion-native .nmcnative-readonly {
+                padding-top: 8px;
             }
         }
     `;
@@ -3894,12 +4105,18 @@ function bindEvents() {
     element('nmcnativeRefreshTogetherMessages').addEventListener('click', () => {
         void withBusy('正在刷新网易云聊天记录...', async () => {
             await refreshTogetherMessageContacts();
+            startMessagePolling();
             setMessage('网易云聊天记录已刷新。', 'success');
         });
     });
     element('nmcnativeTogetherReplyDetails').addEventListener('toggle', event => {
         if (event.target.open && state.togetherEnabled && state.messageContacts.length === 0) {
             void withBusy('正在读取网易云私信...', refreshTogetherMessageContacts);
+            startMessagePolling();
+        } else if (event.target.open) {
+            startMessagePolling();
+        } else {
+            stopMessagePolling();
         }
     });
     element('nmcnativeLoadSongComments').addEventListener('click', () => {
@@ -4030,12 +4247,13 @@ function bindEvents() {
         });
     });
     element('nmcnativeToggleSongPolling').addEventListener('click', () => {
-        if (state.togetherPollTimer) {
-            stopTogetherPolling();
-            setMessage('已停止刷新当前歌曲。', 'info');
-        } else {
-            startTogetherPolling();
-        }
+        void withBusy('正在刷新当前歌曲...', async () => {
+            await refreshCurrentTogetherSong({ startNative: true });
+            if (!state.togetherPollTimer) {
+                startTogetherPolling({ pollNow: false });
+            }
+            setMessage('已刷新网易云当前播放歌曲。', 'success');
+        });
     });
     element('nmcnativeSpeakSong').addEventListener('click', () => {
         void withBusy(`${activeCharacterName()} 正在写听歌短句...`, speakCurrentSongToUser);
@@ -4056,6 +4274,9 @@ function bindEvents() {
         if (document.hidden) {
             stopLoginPolling();
             stopTogetherPolling();
+            stopMessagePolling();
+        } else if (extension_settings[EXTENSION_KEY]?.activeTab === 'together') {
+            startMessagePolling();
         }
     });
 
@@ -4064,6 +4285,7 @@ function bindEvents() {
             const panel = element('netease-music-companion-native');
             if (panel && panel.offsetParent === null) {
                 stopTogetherPolling();
+                stopMessagePolling();
             }
         });
         state.panelObserver.observe(document.body, {
@@ -4107,6 +4329,7 @@ async function initializePanel() {
             await refreshTogetherState().catch(() => {});
             await refreshNativeServiceState().catch(() => {});
             await refreshTogetherMessageContacts().catch(() => {});
+            startMessagePolling();
         }
     } catch {
         setMessage('插件后端不可用。请确认 SillyTavern 已启用服务端插件并重启。', 'error');

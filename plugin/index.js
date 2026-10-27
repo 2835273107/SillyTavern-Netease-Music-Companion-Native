@@ -1616,6 +1616,51 @@ export async function init(router) {
         });
     }));
 
+    router.get('/together/native/now-playing', wrapRoute(async (_request, response) => {
+        if (rejectTogetherDisabled(response)) {
+            return;
+        }
+        if (!nativeBridge.describe().running) {
+            throw new PublicError('独立原生服务尚未启动，请先启动服务并打开网易云桌面客户端', 503);
+        }
+        const cookie = activeCookieOrThrow();
+        const details = await nativeBridge.getStatus();
+        const client = details?.client || {};
+        const songId = cleanText(client.songId, 80);
+        if (!client.available) {
+            throw new PublicError(
+                cleanText(client.error, 240) || '网易云桌面客户端未连接或 CDP 端口不可用',
+                503,
+            );
+        }
+        if (!/^\d{1,20}$/.test(songId)) {
+            throw new PublicError('网易云桌面客户端当前没有正在播放的歌曲', 409);
+        }
+        const { body } = await requestNetease('/song/detail', {
+            params: { ids: songId },
+            cookie,
+        });
+        const rawSong = (upstreamData(body)?.songs || body?.songs || [])[0];
+        if (!rawSong) {
+            throw new PublicError('网易云 API 未返回当前歌曲详情', 502);
+        }
+        response.json({
+            inRoom: Boolean(client.roomId),
+            roomId: cleanText(client.roomId, 200),
+            songId,
+            songName: cleanText(rawSong.name, 200) || `歌曲 ${songId}`,
+            artist: (rawSong.ar || rawSong.artists || [])
+                .map(item => item.name)
+                .filter(Boolean)
+                .join(', '),
+            album: cleanText(rawSong.al?.name || rawSong.album?.name, 200),
+            duration: Number(rawSong.dt || rawSong.duration) || 0,
+            coverUrl: cleanText(rawSong.al?.picUrl || rawSong.album?.picUrl, 1000),
+            progress: Number(client.progress) || 0,
+            source: 'native-client',
+        });
+    }));
+
     router.get('/together/room-playlist', wrapRoute(async (_request, response) => {
         if (rejectTogetherDisabled(response)) {
             return;

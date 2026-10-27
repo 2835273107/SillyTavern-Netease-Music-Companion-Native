@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.9.1
+
+- Added native-client current-song refresh with on-demand native service start
+  and local reverse fallback.
+- Changed “Refresh current song” into a one-shot action while automatic polling
+  continues separately.
+- Added four-second private-message polling and periodic contact refresh while
+  the reply panel is open.
+- Reworked the mobile layout with four-column tabs, two-column action grids,
+  larger touch targets and bounded internal scrolling.
+
 ## 1.9.0
 
 - Added a shared lyric extractor that reuses loaded LRC data or fetches lyrics
