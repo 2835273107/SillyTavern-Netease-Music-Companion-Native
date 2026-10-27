@@ -54,6 +54,7 @@ const state = {
     selectedMessageContactId: '',
     messageHistory: [],
     generatedTogetherReplies: [],
+    secondaryAiConfig: null,
     commentedSongIds: new Set(),
     commentingSongIds: new Set(),
     characterNameListeners: [],
@@ -213,6 +214,7 @@ function setBusy(isBusy, label = '处理中...') {
         renderTogetherVisibility();
         updatePlaylistControls();
         updateMessageReplyAvailability();
+        renderPlayerProgress();
     }
 }
 
@@ -534,6 +536,106 @@ function resetPlaylistControls() {
     updatePlaylistControls();
 }
 
+function renderSecondaryAiConfig(config = {}) {
+    state.secondaryAiConfig = {
+        enabled: config.enabled === true,
+        url: String(config.url || ''),
+        model: String(config.model || ''),
+        maxOutputTokens: Number(config.maxOutputTokens) || 512,
+        modules: {
+            playlist: config.modules?.playlist !== false,
+            autoNext: config.modules?.autoNext === true,
+            comment: config.modules?.comment === true,
+            private: config.modules?.private === true,
+        },
+        hasApiKey: config.hasApiKey === true,
+    };
+    const fields = {
+        nmcnativeSecondaryAiEnabled: state.secondaryAiConfig.enabled,
+        nmcnativeSecondaryAiPlaylist: state.secondaryAiConfig.modules.playlist,
+        nmcnativeSecondaryAiAutoNext: state.secondaryAiConfig.modules.autoNext,
+        nmcnativeSecondaryAiComment: state.secondaryAiConfig.modules.comment,
+        nmcnativeSecondaryAiPrivate: state.secondaryAiConfig.modules.private,
+    };
+    for (const [id, checked] of Object.entries(fields)) {
+        const input = element(id);
+        if (input) {
+            input.checked = checked;
+        }
+    }
+    const url = element('nmcnativeSecondaryAiUrl');
+    const model = element('nmcnativeSecondaryAiModel');
+    const maxTokens = element('nmcnativeSecondaryAiMaxTokens');
+    const apiKey = element('nmcnativeSecondaryAiKey');
+    if (url) {
+        url.value = state.secondaryAiConfig.url;
+    }
+    if (model) {
+        model.value = state.secondaryAiConfig.model;
+    }
+    if (maxTokens) {
+        maxTokens.value = String(state.secondaryAiConfig.maxOutputTokens);
+    }
+    if (apiKey) {
+        apiKey.value = '';
+        apiKey.placeholder = state.secondaryAiConfig.hasApiKey
+            ? '已保存，留空保持不变'
+            : '可选；本机 API 可留空';
+    }
+    setText(
+        'nmcnativeSecondaryAiStatus',
+        state.secondaryAiConfig.enabled
+            ? `已启用 · ${state.secondaryAiConfig.model || '未填写模型'}`
+            : '未启用，全部任务使用酒馆主 AI。',
+    );
+}
+
+function secondaryAiModuleEnabled(task) {
+    const config = state.secondaryAiConfig;
+    return Boolean(
+        config?.enabled
+        && config.url
+        && config.model
+        && config.modules?.[task],
+    );
+}
+
+async function saveSecondaryAiConfig() {
+    const body = {
+        enabled: element('nmcnativeSecondaryAiEnabled')?.checked === true,
+        url: element('nmcnativeSecondaryAiUrl')?.value.trim() || '',
+        apiKey: element('nmcnativeSecondaryAiKey')?.value.trim() || '',
+        model: element('nmcnativeSecondaryAiModel')?.value.trim() || '',
+        maxOutputTokens: Number(element('nmcnativeSecondaryAiMaxTokens')?.value) || 512,
+        modules: {
+            playlist: element('nmcnativeSecondaryAiPlaylist')?.checked === true,
+            autoNext: element('nmcnativeSecondaryAiAutoNext')?.checked === true,
+            comment: element('nmcnativeSecondaryAiComment')?.checked === true,
+            private: element('nmcnativeSecondaryAiPrivate')?.checked === true,
+        },
+        test: true,
+    };
+    const result = await api('/secondary-ai/config', { method: 'POST', body });
+    renderSecondaryAiConfig(result.config || {});
+    const models = Array.isArray(result.test?.models) ? result.test.models : [];
+    const datalist = element('nmcnativeSecondaryAiModels');
+    if (datalist) {
+        datalist.replaceChildren(...models.map(model => option(model, model)));
+    }
+    if (result.test?.ok) {
+        setText(
+            'nmcnativeSecondaryAiStatus',
+            models.length ? `连接成功，读取到 ${models.length} 个模型。` : '连接成功。',
+        );
+        setMessage('副 API 配置已保存。', 'success');
+    } else if (result.test?.error) {
+        setText('nmcnativeSecondaryAiStatus', `已保存，但测试失败：${result.test.error}`);
+        setMessage('副 API 配置已保存，但连接测试失败。', 'warning');
+    } else {
+        setMessage('副 API 配置已保存。', 'success');
+    }
+}
+
 async function refreshStatus({ silent = false } = {}) {
     try {
         const status = await api('/status');
@@ -541,6 +643,7 @@ async function refreshStatus({ silent = false } = {}) {
         state.activeAccountId = String(status.activeAccountId || '');
         state.loggedIn = status.loggedIn === true;
         state.togetherEnabled = status.togetherEnabled === true;
+        renderSecondaryAiConfig(status.secondaryAi || {});
         renderAccounts();
         renderLoginStatus(status);
         renderTogetherVisibility();
@@ -952,6 +1055,32 @@ function syncPlayerLyrics() {
     });
 }
 
+function formatPlaybackTime(value) {
+    const seconds = Math.max(0, Math.floor(Number(value) || 0));
+    return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+}
+
+function renderPlayerProgress() {
+    const audio = element('nmcnativePlayerAudio');
+    const seek = element('nmcnativePlayerSeek');
+    const time = element('nmcnativePlayerTime');
+    const toggle = element('nmcnativePlayerToggle');
+    const currentTime = Number(audio?.currentTime) || 0;
+    const duration = Number.isFinite(Number(audio?.duration)) ? Number(audio.duration) : 0;
+    if (seek) {
+        seek.max = String(Math.max(0, duration));
+        seek.value = String(Math.min(currentTime, duration || currentTime));
+        seek.disabled = !duration;
+    }
+    if (time) {
+        time.textContent = `${formatPlaybackTime(currentTime)} / ${formatPlaybackTime(duration)}`;
+    }
+    if (toggle) {
+        toggle.textContent = audio && !audio.paused ? '暂停' : '播放';
+        toggle.disabled = !audio?.src;
+    }
+}
+
 async function loadPlayerSong(song, { autoplay = false, queue = null } = {}) {
     if (!song?.id) {
         throw new Error('缺少歌曲 ID');
@@ -982,6 +1111,15 @@ async function loadPlayerSong(song, { autoplay = false, queue = null } = {}) {
     audio.src = `${backendBase()}/song-audio/${encodeURIComponent(state.playerSong.id)}?level=standard`;
     audio.dataset.songId = state.playerSong.id;
     audio.load();
+    renderPlayerProgress();
+    if (autoplay) {
+        try {
+            await audio.play();
+            setMessage(`正在酒馆中播放《${state.playerSong.name}》。`, 'success');
+        } catch {
+            setMessage('浏览器阻止了自动播放，请点击播放器上的播放按钮。', 'info');
+        }
+    }
     state.lyricLines = [];
     renderPlayerLyrics();
     try {
@@ -992,14 +1130,6 @@ async function loadPlayerSong(song, { autoplay = false, queue = null } = {}) {
         }
     } catch (error) {
         setMessage(error?.message || '歌词读取失败', 'error');
-    }
-    if (autoplay) {
-        try {
-            await audio.play();
-            setMessage(`正在酒馆中播放《${state.playerSong.name}》。`, 'success');
-        } catch {
-            setMessage('浏览器阻止了自动播放，请点击音频播放器上的播放按钮。', 'info');
-        }
     }
 }
 
@@ -1117,6 +1247,13 @@ function renderPlayerPlaylistTrackChoices(emptyText = '') {
                     itemState.textContent = isSelected ? '已选' : '选择';
                 }
             });
+            state.playerSelectionSource = 'playlist';
+            void withBusy(`正在播放《${track.name || '歌曲'}》...`, async () => {
+                await loadPlayerSong(track, {
+                    autoplay: true,
+                    queue: state.playerPlaylistTracks,
+                });
+            });
         });
         list.append(row);
     });
@@ -1196,7 +1333,67 @@ async function searchPlayerSongs() {
     if (state.playerSearchResults.length) {
         select.value = state.playerSearchResults[0].id;
     }
+    renderPlayerSearchResults();
     setMessage(`找到 ${state.playerSearchResults.length} 首候选歌曲。`, 'success');
+}
+
+function renderPlayerSearchResults() {
+    const list = element('nmcnativePlayerSearchList');
+    const select = element('nmcnativePlayerSearchResults');
+    if (!list || !select) {
+        return;
+    }
+    list.replaceChildren();
+    if (!state.playerSearchResults.length) {
+        const empty = document.createElement('p');
+        empty.className = 'nmcnative-list-empty';
+        empty.textContent = '没有搜索结果';
+        list.append(empty);
+        return;
+    }
+    state.playerSearchResults.forEach((song, index) => {
+        const row = document.createElement('button');
+        row.type = 'button';
+        row.className = 'nmcnative-track-choice';
+        row.dataset.songId = String(song.id);
+        row.setAttribute('role', 'option');
+        const selected = String(song.id) === String(select.value || '');
+        row.classList.toggle('selected', selected);
+        row.setAttribute('aria-selected', String(selected));
+
+        const number = document.createElement('span');
+        number.className = 'nmcnative-track-number';
+        number.textContent = String(index + 1).padStart(2, '0');
+        const body = document.createElement('span');
+        body.className = 'nmcnative-track-body';
+        const name = document.createElement('span');
+        name.className = 'nmcnative-track-name';
+        name.textContent = song.name || '未知歌曲';
+        const meta = document.createElement('span');
+        meta.className = 'nmcnative-track-meta';
+        meta.textContent = [song.artist || '未知歌手', song.album || ''].filter(Boolean).join(' · ');
+        const stateLabel = document.createElement('span');
+        stateLabel.className = 'nmcnative-track-state';
+        stateLabel.textContent = '播放';
+        body.append(name, meta);
+        row.append(number, body, stateLabel);
+        row.addEventListener('click', () => {
+            select.value = String(song.id);
+            state.playerSelectionSource = 'search';
+            list.querySelectorAll('.nmcnative-track-choice').forEach(item => {
+                const isSelected = item.dataset.songId === String(song.id);
+                item.classList.toggle('selected', isSelected);
+                item.setAttribute('aria-selected', String(isSelected));
+            });
+            void withBusy(`正在播放《${song.name || '歌曲'}》...`, async () => {
+                await loadPlayerSong(song, {
+                    autoplay: true,
+                    queue: state.playerSearchResults,
+                });
+            });
+        });
+        list.append(row);
+    });
 }
 
 async function playSelectedPlayerSong() {
@@ -1264,7 +1461,7 @@ async function playNextPlayerSong({ automatic = false } = {}) {
             try {
                 const reply = await quiet(
                     `你是 {{char}}。${currentSongContext.text}\n请根据你的人格、背景、最近对话以及当前歌曲歌词，从以下候选歌曲及其歌词中选择下一首：${JSON.stringify(candidates)}。选择理由必须结合歌词，禁止只根据歌名选择或编造歌词。输出严格 JSON：{"songId":"候选中的歌曲ID","reason":"一句角色口吻短句"}。只输出 JSON。`,
-                    { candidateGuard: false },
+                    { candidateGuard: false, task: 'autoNext' },
                 );
                 const parsed = parseJsonReply(reply);
                 selected = state.playerQueue.find(
@@ -1739,7 +1936,11 @@ async function generateTogetherReply() {
         '请以 {{char}} 的身份，根据这段聊天接续回复 1 到 3 条连续的短句。每条都像真实私信，可分别表达情绪、回应和补充，不要重复，不要添加角色名前缀或动作说明。',
         `只输出严格 JSON：{"messages":["第一条","第二条"]}。每条不超过 ${TOGETHER_REPLY_CHAR_LIMIT} 个中文字符。`,
     ].join('\n\n');
-    const reply = await quiet(prompt, { candidateGuard: false, responseLength: 300 });
+    const reply = await quiet(prompt, {
+        candidateGuard: false,
+        responseLength: 300,
+        task: 'private',
+    });
     const messages = parseCharacterMessages(reply);
     if (!messages.length) {
         throw new Error(`${activeCharacterName()} 没有生成可发送的回复`);
@@ -1820,6 +2021,7 @@ async function speakCurrentSongToUser() {
     ].filter(Boolean).join('\n\n'), {
         candidateGuard: false,
         responseLength: 160,
+        task: 'private',
     });
     const content = String(reply)
         .replace(/^[“”"'「」]+|[“”"'「」]+$/g, '')
@@ -2169,7 +2371,7 @@ async function characterCommentOnSong() {
     const songDetails = await songContextForGeneration(song, { maxLyricChars: 6000 });
     const generated = await quiet(
         `你是 {{char}}。${songDetails.text}\n请完全以角色本人的人格、经历和说话方式，结合歌词中的具体意象、句子或情绪，写一段发布在网易云歌曲评论区的短评论，不超过 ${SONG_COMMENT_CHAR_LIMIT} 个中文字符。禁止只复述歌名，不要自称 AI，不要解释，不要加引号，只输出评论正文。`,
-        { candidateGuard: false, responseLength: 220 },
+        { candidateGuard: false, responseLength: 220, task: 'comment' },
     );
     const content = await postSongComment(songId, generated);
     setText('nmcnativeGeneratedComment', content);
@@ -2228,7 +2430,7 @@ async function toolCommentSong(args = {}) {
         const songDetails = await songContextForGeneration(song, { maxLyricChars: 6000 });
         content = await quiet(
             `你是 {{char}}。${songDetails.text}\n请以角色本人的口吻，结合歌词中的具体意象、句子或情绪，写一段网易云歌曲短评论，不超过 ${SONG_COMMENT_CHAR_LIMIT} 个中文字符。禁止只复述歌名，不要自称 AI，不要解释，只输出评论正文。`,
-            { candidateGuard: false, responseLength: 220 },
+            { candidateGuard: false, responseLength: 220, task: 'comment' },
         );
     }
     const posted = await postSongComment(song.id, content);
@@ -2637,6 +2839,7 @@ async function quiet(prompt, {
     candidateGuard = true,
     includeWorldbook = true,
     responseLength = null,
+    task = '',
 } = {}) {
     if (typeof generateQuietPrompt !== 'function') {
         throw new Error('当前 SillyTavern 不支持后台静默生成');
@@ -2658,6 +2861,28 @@ async function quiet(prompt, {
     if (Number.isFinite(responseLength) && responseLength > 0) {
         options.responseLength = Math.floor(responseLength);
     }
+    if (secondaryAiModuleEnabled(task)) {
+        try {
+            const result = await api('/secondary-ai/generate', {
+                method: 'POST',
+                body: {
+                    task,
+                    prompt: prepared,
+                    maxOutputTokens: Number(responseLength) || state.secondaryAiConfig.maxOutputTokens,
+                },
+            });
+            setText(
+                'nmcnativeSecondaryAiStatus',
+                `已启用 · ${result.model || state.secondaryAiConfig.model} · 调用成功`,
+            );
+            return String(result.text || '').trim();
+        } catch (error) {
+            setText(
+                'nmcnativeSecondaryAiStatus',
+                `副 API 失败，已回退主 AI：${error?.message || error}`,
+            );
+        }
+    }
     const result = await generateQuietPrompt(options);
     return String(result || '').trim();
 }
@@ -2666,7 +2891,10 @@ async function generatePersonaPlan({ withName = true } = {}) {
     const shape = withName
         ? '{"playlistName":"符合你气质的歌单名","keywords":["1-3个搜索关键词"]}'
         : '{"keywords":["1-3个搜索关键词"]}';
-    const reply = await quiet(`你是 {{char}}。请根据你的人格、背景和最近对话，输出严格 JSON：${shape}。只输出 JSON，不要解释。`);
+    const reply = await quiet(
+        `你是 {{char}}。请根据你的人格、背景和最近对话，输出严格 JSON：${shape}。只输出 JSON，不要解释。`,
+        { task: 'playlist' },
+    );
     const parsed = parseJsonReply(reply);
     const keywords = (Array.isArray(parsed.keywords) ? parsed.keywords : [])
         .map(value => String(value || '').trim())
@@ -2828,7 +3056,9 @@ reason 不是分析或第三人称评价，而是 {{char}} 当场直接对 {{use
 只能在上述候选中选歌；候选已经排除目标歌单现有歌曲及同名版本，禁止尝试选回、替换或评论这些已有歌曲。
 推荐语必须结合该歌曲歌词中的具体意象、句子或情绪；歌词为空时才可以只根据歌名和歌手推荐，禁止编造歌词。
 每首推荐语不超过 40 个中文字符，不同歌曲之间不要重复。
-输出严格 JSON：{"selected":[{"id":"候选ID","reason":"我对 {{user}} 说的推荐短句"}]}。只输出 JSON。`);
+输出严格 JSON：{"selected":[{"id":"候选ID","reason":"我对 {{user}} 说的推荐短句"}]}。只输出 JSON。`, {
+        task: 'playlist',
+    });
     const parsed = parseJsonReply(reply);
     const candidateIds = new Set(compact.map(song => song.id));
     const used = new Set();
@@ -3399,6 +3629,31 @@ function injectStyles() {
             font-size: .84rem;
             font-weight: 650;
         }
+        #netease-music-companion-native #nmcnativePlayerAudio {
+            display: none;
+        }
+        #netease-music-companion-native .nmcnative-player-controls {
+            display: grid;
+            grid-template-columns: auto minmax(0, 1fr) auto;
+            align-items: center;
+            gap: 8px;
+        }
+        #netease-music-companion-native .nmcnative-player-controls button {
+            min-width: 54px;
+        }
+        #netease-music-companion-native .nmcnative-player-controls input[type="range"] {
+            height: 24px;
+            margin: 0;
+            accent-color: var(--SmartThemeQuoteColor);
+        }
+        #netease-music-companion-native .nmcnative-player-time {
+            min-width: 82px;
+            font-size: .7rem;
+            font-variant-numeric: tabular-nums;
+            text-align: right;
+            opacity: .68;
+            white-space: nowrap;
+        }
         #netease-music-companion-native details.nmcnative-details {
             margin-top: 9px;
             border: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor) 34%, transparent);
@@ -3942,7 +4197,6 @@ function panelHtml() {
                         <label for="nmcnativeAccountSelect">选择账号</label>
                         <select id="nmcnativeAccountSelect"></select>
                     </div>
-                    <button id="nmcnativeSwitchAccount" type="button">切换</button>
                     <button id="nmcnativeAddAccount" type="button">+ 添加账号</button>
                     <button id="nmcnativeDeleteAccount" type="button">删除账号</button>
                     <button id="nmcnativeRenameAccount" type="button">重命名</button>
@@ -3971,12 +4225,9 @@ function panelHtml() {
                 </div>
 
                 <div data-nmcnative-player-source-panel="playlist" data-active="true">
-                    <div class="nmcnative-row">
-                        <div class="nmcnative-field">
-                            <label for="nmcnativePlayerPlaylistSearch">筛选歌单</label>
-                            <input id="nmcnativePlayerPlaylistSearch" type="search" placeholder="歌单名或创建者">
-                        </div>
-                        <button id="nmcnativeRefreshPlayerPlaylists" type="button">刷新歌单</button>
+                    <div class="nmcnative-field">
+                        <label for="nmcnativePlayerPlaylistSearch">筛选歌单</label>
+                        <input id="nmcnativePlayerPlaylistSearch" type="search" placeholder="歌单名或创建者">
                     </div>
                     <p id="nmcnativePlayerPlaylistSummary" class="nmcnative-list-summary">尚未读取歌单</p>
                     <div id="nmcnativePlayerPlaylistList" class="nmcnative-playlist-list" role="listbox" aria-label="账号歌单">
@@ -3997,10 +4248,6 @@ function panelHtml() {
                     <select id="nmcnativePlayerPlaylistTrack" hidden aria-hidden="true">
                         <option value="">— 先读取歌单 —</option>
                     </select>
-                    <div class="nmcnative-actions">
-                        <button id="nmcnativePlayPlaylistTrack" class="nmcnative-primary" type="button">播放选中歌曲</button>
-                        <button id="nmcnativeLoadPlayerPlaylist" type="button">重新读取歌曲</button>
-                    </div>
                 </div>
 
                 <div data-nmcnative-player-source-panel="search" data-active="false">
@@ -4011,18 +4258,22 @@ function panelHtml() {
                         </div>
                         <button id="nmcnativePlayerSearch" type="button">搜索</button>
                     </div>
-                    <div class="nmcnative-field">
-                        <label for="nmcnativePlayerSearchResults">搜索结果</label>
-                        <select id="nmcnativePlayerSearchResults">
-                            <option value="">— 先搜索歌曲 —</option>
-                        </select>
+                    <select id="nmcnativePlayerSearchResults" hidden aria-hidden="true">
+                        <option value="">— 先搜索歌曲 —</option>
+                    </select>
+                    <div id="nmcnativePlayerSearchList" class="nmcnative-track-list" role="listbox" aria-label="搜索结果">
+                        <p class="nmcnative-list-empty">搜索后点击歌曲即可播放</p>
                     </div>
-                    <button id="nmcnativePlaySelectedSong" class="nmcnative-primary nmcnative-wide-button" type="button">播放选中歌曲</button>
                 </div>
 
                 <div class="nmcnative-now-playing">
                     <p id="nmcnativePlayerSong" class="nmcnative-status-line">尚未载入歌曲</p>
-                    <audio id="nmcnativePlayerAudio" controls preload="metadata"></audio>
+                    <audio id="nmcnativePlayerAudio" preload="metadata"></audio>
+                    <div class="nmcnative-player-controls">
+                        <button id="nmcnativePlayerToggle" type="button" disabled>播放</button>
+                        <input id="nmcnativePlayerSeek" type="range" min="0" max="0" step="0.1" value="0" aria-label="播放进度">
+                        <span id="nmcnativePlayerTime" class="nmcnative-player-time">0:00 / 0:00</span>
+                    </div>
                     <div class="nmcnative-actions" style="margin-top:8px">
                         <button id="nmcnativePlayerPrevious" type="button">上一首</button>
                         <button id="nmcnativePlayerNext" type="button">下一首</button>
@@ -4055,6 +4306,41 @@ function panelHtml() {
                         <label class="nmcnative-toggle nmcnative-toggle-wide"><input id="nmcnativeConversationTools" type="checkbox"> <span data-nmcnative-char-template="允许 {char} 在对话中调用网易云工具">允许角色在对话中调用网易云工具</span></label>
                     </div>
                     <p class="nmcnative-note" data-nmcnative-char-template="{char} 的后台生成会沿用当前 SillyTavern 预设，并完整读取绑定的主世界书与附加世界书。对话工具仍需在 SillyTavern 的 Function Calling 设置中启用。">角色的后台生成会沿用当前 SillyTavern 预设，并完整读取绑定的主世界书与附加世界书。对话工具仍需在 SillyTavern 的 Function Calling 设置中启用。</p>
+                </details>
+
+                <details id="nmcnativeSecondaryAiDetails" class="nmcnative-details">
+                    <summary>副 AI API（可选）</summary>
+                    <div class="nmcnative-toggle-grid">
+                        <label class="nmcnative-toggle nmcnative-toggle-wide"><input id="nmcnativeSecondaryAiEnabled" type="checkbox"> 启用副 API</label>
+                    </div>
+                    <div class="nmcnative-grid">
+                        <div class="nmcnative-field nmcnative-field-wide">
+                            <label for="nmcnativeSecondaryAiUrl">API URL</label>
+                            <input id="nmcnativeSecondaryAiUrl" type="url" spellcheck="false" placeholder="https://example.com/v1">
+                        </div>
+                        <div class="nmcnative-field nmcnative-field-wide">
+                            <label for="nmcnativeSecondaryAiKey">API Key</label>
+                            <input id="nmcnativeSecondaryAiKey" type="password" autocomplete="off">
+                        </div>
+                        <div class="nmcnative-field">
+                            <label for="nmcnativeSecondaryAiModel">模型名</label>
+                            <input id="nmcnativeSecondaryAiModel" type="text" spellcheck="false" list="nmcnativeSecondaryAiModels" placeholder="模型 ID">
+                            <datalist id="nmcnativeSecondaryAiModels"></datalist>
+                        </div>
+                        <div class="nmcnative-field">
+                            <label for="nmcnativeSecondaryAiMaxTokens">最大输出 Token</label>
+                            <input id="nmcnativeSecondaryAiMaxTokens" type="number" min="64" max="8192" step="64" value="512">
+                        </div>
+                    </div>
+                    <p class="nmcnative-note">选择由副 API 执行的任务；失败时自动回退酒馆主 AI。</p>
+                    <div class="nmcnative-toggle-grid">
+                        <label class="nmcnative-toggle"><input id="nmcnativeSecondaryAiPlaylist" type="checkbox"> 歌单策划与选歌</label>
+                        <label class="nmcnative-toggle"><input id="nmcnativeSecondaryAiAutoNext" type="checkbox"> 自动下一首</label>
+                        <label class="nmcnative-toggle"><input id="nmcnativeSecondaryAiComment" type="checkbox"> 歌曲评论</label>
+                        <label class="nmcnative-toggle"><input id="nmcnativeSecondaryAiPrivate" type="checkbox"> 私信回复</label>
+                    </div>
+                    <button id="nmcnativeSecondaryAiSave" class="nmcnative-primary nmcnative-wide-button" type="button">保存并测试</button>
+                    <p id="nmcnativeSecondaryAiStatus" class="nmcnative-status-line">未启用，全部任务使用酒馆主 AI。</p>
                 </details>
             </section>
 
@@ -4163,7 +4449,6 @@ function panelHtml() {
                         <option value="">— 选择一个已有歌单 —</option>
                 </select>
                 <p id="nmcnativeTargetPlaylistStatus" class="nmcnative-status-line">尚未选择目标歌单</p>
-                <p class="nmcnative-note" data-nmcnative-char-template="点击歌单会立即切换为目标歌单，不需要再次确认。{char} 会先搜索候选歌曲，再根据角色设定选择；候选歌曲不会从当前歌单中读取。">点击歌单会立即切换为目标歌单，不需要再次确认。角色会先搜索候选歌曲，再根据角色设定选择；候选歌曲不会从当前歌单中读取。</p>
                 <div class="nmcnative-actions">
                     <button id="nmcnativeCreateByPersona" class="nmcnative-primary" type="button">新建歌单</button>
                     <button id="nmcnativeAddToCurrent" type="button">为当前歌单加歌</button>
@@ -4277,11 +4562,16 @@ function bindEvents() {
         const button = element('nmcnativeDeleteAccount');
         const chosen = element('nmcnativeAccountSelect').value;
         button.disabled = !chosen || chosen === state.activeAccountId || state.accounts.length <= 1;
+        if (chosen && chosen !== state.activeAccountId) {
+            void withBusy('正在切换账号...', switchAccount).then(() => {
+                if (element('nmcnativeAccountSelect').value !== state.activeAccountId) {
+                    element('nmcnativeAccountSelect').value = state.activeAccountId;
+                    renderAccounts();
+                }
+            });
+        }
     });
 
-    element('nmcnativeSwitchAccount').addEventListener('click', () => {
-        void withBusy('正在切换账号...', () => switchAccount());
-    });
     element('nmcnativeDeleteAccount').addEventListener('click', () => {
         void withBusy('正在删除账号...', async () => {
             const accountId = element('nmcnativeAccountSelect').value;
@@ -4362,9 +4652,6 @@ function bindEvents() {
         void withBusy(`${activeCharacterName()} 正在为当前歌单选歌...`, () => runAddToCurrentFlow());
     });
 
-    element('nmcnativeRefreshPlayerPlaylists').addEventListener('click', () => {
-        void withBusy('正在读取播放器歌单...', refreshPlayerPlaylists);
-    });
     element('nmcnativePlayerPlaylistSearch').addEventListener('input', () => {
         renderPlayerPlaylistChoices();
     });
@@ -4376,11 +4663,24 @@ function bindEvents() {
             void withBusy('正在读取歌单歌曲...', loadPlayerPlaylistTracks);
         }
     });
-    element('nmcnativeLoadPlayerPlaylist').addEventListener('click', () => {
-        void withBusy('正在加载歌单歌曲...', loadPlayerPlaylistTracks);
+    element('nmcnativePlayerToggle').addEventListener('click', () => {
+        const audio = element('nmcnativePlayerAudio');
+        if (!audio?.src) {
+            return;
+        }
+        if (audio.paused) {
+            void audio.play().catch(error => setMessage(error?.message || '播放失败', 'error'));
+        } else {
+            audio.pause();
+        }
     });
-    element('nmcnativePlayPlaylistTrack').addEventListener('click', () => {
-        void withBusy('正在载入歌单歌曲...', playSelectedPlayerPlaylistSong);
+    element('nmcnativePlayerSeek').addEventListener('input', event => {
+        const audio = element('nmcnativePlayerAudio');
+        const value = Number(event.target.value);
+        if (audio && Number.isFinite(value)) {
+            audio.currentTime = value;
+        }
+        renderPlayerProgress();
     });
     element('nmcnativePlayerPlaylistTrack').addEventListener('change', () => {
         state.playerSelectionSource = 'playlist';
@@ -4396,9 +4696,6 @@ function bindEvents() {
             event.preventDefault();
             void withBusy('正在搜索歌曲...', searchPlayerSongs);
         }
-    });
-    element('nmcnativePlaySelectedSong').addEventListener('click', () => {
-        void withBusy('正在载入歌曲...', playSelectedPlayerSong);
     });
     element('nmcnativePlayTogetherSong').addEventListener('click', () => {
         void withBusy('正在读取一起听歌曲...', playCurrentTogetherSong);
@@ -4428,8 +4725,18 @@ function bindEvents() {
             'info',
         );
     });
-    element('nmcnativePlayerAudio').addEventListener('timeupdate', syncPlayerLyrics);
+    element('nmcnativeSecondaryAiSave').addEventListener('click', () => {
+        void withBusy('正在保存并测试副 API...', saveSecondaryAiConfig);
+    });
+    element('nmcnativePlayerAudio').addEventListener('timeupdate', () => {
+        syncPlayerLyrics();
+        renderPlayerProgress();
+    });
     element('nmcnativePlayerAudio').addEventListener('seeked', syncPlayerLyrics);
+    element('nmcnativePlayerAudio').addEventListener('loadedmetadata', renderPlayerProgress);
+    element('nmcnativePlayerAudio').addEventListener('durationchange', renderPlayerProgress);
+    element('nmcnativePlayerAudio').addEventListener('play', renderPlayerProgress);
+    element('nmcnativePlayerAudio').addEventListener('pause', renderPlayerProgress);
     element('nmcnativePlayerAudio').addEventListener('ended', () => {
         void playNextPlayerSong({ automatic: true }).catch(error => {
             setMessage(error?.message || '自动播放下一首失败', 'error');

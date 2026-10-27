@@ -23,6 +23,20 @@
   "activeAccountId": "char_alt",
   "user_netease_id": "",
   "enableTogetherListen": false,
+  "secondaryAi": {
+    "enabled": false,
+    "name": "副 API",
+    "url": "",
+    "apiKey": "",
+    "model": "",
+    "maxOutputTokens": 512,
+    "modules": {
+      "playlist": true,
+      "autoNext": false,
+      "comment": false,
+      "private": false
+    }
+  },
   "togetherNative": {
     "autoStart": false,
     "pythonPath": "",

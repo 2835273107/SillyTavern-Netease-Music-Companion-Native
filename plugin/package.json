@@ -1,6 +1,6 @@
 {
   "name": "sillytavern-netease-music-companion-native",
-  "version": "1.11.1",
+  "version": "1.12.0",
   "description": "Independent SillyTavern Netease Music Companion with a bundled native Listen Together service.",
   "type": "module",
   "main": "index.js",

@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.12.0
+
+- Converted the in-Tavern player to click-to-play song lists with compact
+  play/pause, seek and time controls.
+- Removed redundant playlist reload and selected-song play buttons.
+- Made account switching immediate when the account selector changes.
+- Added an optional OpenAI-compatible secondary AI API for playlist planning,
+  auto-next selection, comments and private replies.
+- Stored secondary API keys only in the backend config and automatically fell
+  back to the SillyTavern main AI when a secondary request fails.
+
 ## 1.11.1
 
 - Made target-playlist selection apply immediately when a playlist row is

@@ -15,9 +15,9 @@ test('keeps manifest, package and config on the native namespace', () => {
     const backend = read('plugin/index.js');
     const service = read('plugin/together-native/service.py');
 
-    assert.equal(manifest.version, '1.11.1');
+    assert.equal(manifest.version, '1.12.0');
     assert.equal(manifest.homePage.endsWith('SillyTavern-Netease-Music-Companion-Native'), true);
-    assert.equal(packageJson.version, '1.11.1');
+    assert.equal(packageJson.version, '1.12.0');
     assert.match(frontend, /nmcnativePlayerLyrics/);
     assert.match(backend, /\/song-audio\/:songId/);
     assert.match(backend, /\/together\/send-message/);
@@ -31,7 +31,18 @@ test('keeps manifest, package and config on the native namespace', () => {
     assert.match(frontend, /nmcnativeTargetPlaylistList/);
     assert.doesNotMatch(frontend, /nmcnativeUsePlaylist/);
     assert.match(frontend, /正在切换目标歌单/);
-    assert.match(frontend, /点击歌单会立即切换为目标歌单/);
+    assert.doesNotMatch(frontend, /点击歌单会立即切换为目标歌单/);
+    assert.doesNotMatch(frontend, /nmcnativeSwitchAccount/);
+    assert.doesNotMatch(frontend, /nmcnativePlayPlaylistTrack/);
+    assert.doesNotMatch(frontend, /nmcnativePlaySelectedSong/);
+    assert.match(frontend, /nmcnativePlayerSearchList/);
+    assert.match(frontend, /nmcnativePlayerToggle/);
+    assert.match(frontend, /renderPlayerProgress/);
+    assert.match(frontend, /nmcnativeSecondaryAiSave/);
+    assert.match(frontend, /secondary-ai\/generate/);
+    assert.match(backend, /\/secondary-ai\/config/);
+    assert.match(backend, /\/secondary-ai\/generate/);
+    assert.match(backend, /generateWithSecondaryAi/);
     assert.match(frontend, /data-nmcnative-player-source/);
     assert.match(frontend, /characterWorldbookContext/);
     assert.doesNotMatch(frontend, /WORLDBOOK_CONTEXT_LIMIT/);
@@ -89,6 +100,8 @@ test('keeps manifest, package and config on the native namespace', () => {
     assert.equal(packageJson.name, 'sillytavern-netease-music-companion-native');
     assert.equal(config.togetherNative.port, 3472);
     assert.equal(config.togetherNative.autoStart, false);
+    assert.equal(config.secondaryAi.enabled, false);
+    assert.equal(config.secondaryAi.modules.playlist, true);
     assert.match(frontend, /\/api\/plugins\/netease-music-native/);
     assert.match(frontend, /neteaseMusicCompanionNative/);
     assert.match(frontend, /nmcnativeTogetherMode/);

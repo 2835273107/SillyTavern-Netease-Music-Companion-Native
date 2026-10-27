@@ -3,7 +3,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
-import { TogetherBridge } from './together-bridge.js';
+import { TogetherBridge, isPrivateHost } from './together-bridge.js';
 
 export const info = {
     id: 'netease-music-native',
@@ -17,6 +17,8 @@ const ACCOUNT_ID_PATTERN = /^[A-Za-z0-9_]{1,32}$/;
 const DEFAULT_API_BASE = 'http://localhost:3000';
 const MAX_TRACKS_PER_REQUEST = 20;
 const REQUEST_TIMEOUT_MS = 20_000;
+const SECONDARY_AI_TIMEOUT_MS = 120_000;
+const SECONDARY_AI_TASKS = new Set(['playlist', 'autoNext', 'comment', 'private']);
 
 let settings = null;
 let uidCache = new Map();
@@ -95,6 +97,217 @@ function normalizeApiBase(value) {
     parsed.search = '';
     parsed.hash = '';
     return parsed.toString().replace(/\/+$/, '');
+}
+
+function normalizeSecondaryAiUrl(value) {
+    const text = cleanText(value, 1000);
+    if (!text) {
+        return '';
+    }
+    let parsed;
+    try {
+        parsed = new URL(text);
+    } catch {
+        throw new PublicError('副 API URL 不是有效地址');
+    }
+    if (!['http:', 'https:'].includes(parsed.protocol)) {
+        throw new PublicError('副 API 仅支持 HTTP 或 HTTPS');
+    }
+    if (parsed.protocol === 'http:' && !isPrivateHost(parsed.hostname)) {
+        throw new PublicError('公网副 API 必须使用 HTTPS；HTTP 仅允许本机或私有网段');
+    }
+    parsed.username = '';
+    parsed.password = '';
+    parsed.search = '';
+    parsed.hash = '';
+    return parsed.toString().replace(/\/+$/, '');
+}
+
+function normalizeSecondaryAi(value) {
+    const raw = value && typeof value === 'object' ? value : {};
+    const modules = raw.modules && typeof raw.modules === 'object' ? raw.modules : {};
+    return {
+        enabled: raw.enabled === true,
+        name: cleanText(raw.name, 80) || '副 API',
+        url: normalizeSecondaryAiUrl(raw.url),
+        apiKey: cleanText(raw.apiKey, 4096),
+        model: cleanText(raw.model, 200),
+        maxOutputTokens: Math.max(
+            64,
+            Math.min(8192, Number(raw.maxOutputTokens) || 512),
+        ),
+        modules: {
+            playlist: modules.playlist !== false,
+            autoNext: modules.autoNext === true,
+            comment: modules.comment === true,
+            private: modules.private === true,
+        },
+    };
+}
+
+function secondaryAiApiKey() {
+    return cleanText(
+        process.env.NETEASE_NATIVE_SECONDARY_AI_KEY || settings?.secondaryAi?.apiKey,
+        4096,
+    );
+}
+
+function publicSecondaryAiConfig() {
+    const config = settings?.secondaryAi || normalizeSecondaryAi({});
+    return {
+        enabled: config.enabled,
+        name: config.name,
+        url: config.url,
+        model: config.model,
+        maxOutputTokens: config.maxOutputTokens,
+        modules: { ...config.modules },
+        hasApiKey: Boolean(secondaryAiApiKey()),
+    };
+}
+
+function secondaryAiEnabledForTask(task) {
+    const config = settings?.secondaryAi;
+    return Boolean(
+        config?.enabled
+        && config.url
+        && config.model
+        && SECONDARY_AI_TASKS.has(task)
+        && config.modules?.[task],
+    );
+}
+
+function secondaryAiChatUrl() {
+    const base = normalizeSecondaryAiUrl(settings?.secondaryAi?.url);
+    if (!base) {
+        throw new PublicError('请先填写副 API URL');
+    }
+    if (/\/chat\/completions$/i.test(base)) {
+        return base;
+    }
+    return `${base}${/\/v1$/i.test(base) ? '' : '/v1'}/chat/completions`;
+}
+
+function secondaryAiModelsUrl() {
+    const chatUrl = secondaryAiChatUrl();
+    return chatUrl.replace(/\/chat\/completions$/i, '/models');
+}
+
+function secondaryAiHeaders() {
+    const key = secondaryAiApiKey();
+    return {
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+        ...(key ? { Authorization: `Bearer ${key}` } : {}),
+    };
+}
+
+async function fetchSecondaryAiModels() {
+    let response;
+    try {
+        response = await fetch(secondaryAiModelsUrl(), {
+            method: 'GET',
+            headers: secondaryAiHeaders(),
+            cache: 'no-store',
+            redirect: 'error',
+            signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        });
+    } catch (error) {
+        throw new PublicError(
+            ['AbortError', 'TimeoutError'].includes(error?.name)
+                ? '副 API 模型列表请求超时'
+                : '无法连接副 API 模型列表',
+            502,
+        );
+    }
+    const text = await response.text();
+    let body = {};
+    try {
+        body = text ? JSON.parse(text) : {};
+    } catch {
+        throw new PublicError('副 API 模型列表返回了无法解析的响应', 502);
+    }
+    if (!response.ok) {
+        throw new PublicError(
+            cleanText(body?.error?.message || body?.message, 240)
+                || `副 API 模型列表请求失败 (${response.status})`,
+            502,
+        );
+    }
+    const models = (Array.isArray(body?.data) ? body.data : Array.isArray(body?.models) ? body.models : [])
+        .map(item => cleanText(typeof item === 'string' ? item : item?.id || item?.name, 200))
+        .filter(Boolean)
+        .slice(0, 500);
+    return models;
+}
+
+async function generateWithSecondaryAi({ task, prompt, maxOutputTokens }) {
+    if (!secondaryAiEnabledForTask(task)) {
+        throw new PublicError('副 API 未启用该模块', 409);
+    }
+    const content = String(prompt || '').trim().slice(0, 200_000);
+    if (!content) {
+        throw new PublicError('prompt 不能为空');
+    }
+    let response;
+    try {
+        response = await fetch(secondaryAiChatUrl(), {
+            method: 'POST',
+            headers: secondaryAiHeaders(),
+            cache: 'no-store',
+            redirect: 'error',
+            signal: AbortSignal.timeout(SECONDARY_AI_TIMEOUT_MS),
+            body: JSON.stringify({
+                model: settings.secondaryAi.model,
+                messages: [
+                    {
+                        role: 'system',
+                        content: '严格完成用户消息中的生成任务，并遵守其中要求的输出格式。',
+                    },
+                    { role: 'user', content },
+                ],
+                max_tokens: Math.max(
+                    64,
+                    Math.min(
+                        8192,
+                        Number(maxOutputTokens) || settings.secondaryAi.maxOutputTokens,
+                    ),
+                ),
+                temperature: 0.75,
+            }),
+        });
+    } catch (error) {
+        throw new PublicError(
+            ['AbortError', 'TimeoutError'].includes(error?.name)
+                ? '副 API 请求超时'
+                : '无法连接副 API',
+            502,
+        );
+    }
+    const text = await response.text();
+    let body = {};
+    try {
+        body = text ? JSON.parse(text) : {};
+    } catch {
+        throw new PublicError('副 API 返回了无法解析的响应', 502);
+    }
+    if (!response.ok) {
+        throw new PublicError(
+            cleanText(body?.error?.message || body?.message, 240)
+                || `副 API 请求失败 (${response.status})`,
+            502,
+        );
+    }
+    const rawContent = body?.choices?.[0]?.message?.content
+        ?? body?.choices?.[0]?.text
+        ?? body?.output_text
+        ?? '';
+    const output = Array.isArray(rawContent)
+        ? rawContent.map(part => cleanText(part?.text || part?.content || part, 20_000)).join('\n')
+        : String(rawContent || '').trim();
+    if (!output) {
+        throw new PublicError('副 API 没有返回文本内容', 502);
+    }
+    return output;
 }
 
 function isLocalApiBase(apiBase = getApiBase()) {
@@ -375,6 +588,9 @@ function loadAndNormalizeConfig() {
     if (!raw.neteaseApi || typeof raw.neteaseApi !== 'object') {
         shouldWrite = true;
     }
+    if (!raw.secondaryAi || typeof raw.secondaryAi !== 'object') {
+        shouldWrite = true;
+    }
     const normalized = {
         api_base: normalizeApiBase(raw.api_base),
         neteaseApi: {
@@ -397,6 +613,7 @@ function loadAndNormalizeConfig() {
         activeAccountId,
         user_netease_id: cleanText(raw.user_netease_id, 80),
         enableTogetherListen: raw.enableTogetherListen === true,
+        secondaryAi: normalizeSecondaryAi(raw.secondaryAi),
         togetherNative: {
             autoStart: rawNative.autoStart === true,
             pythonPath: cleanText(rawNative.pythonPath, 1000),
@@ -1438,6 +1655,57 @@ export async function init(router) {
         response.json({ ok: true });
     }));
 
+    router.get('/secondary-ai/config', wrapRoute(async (_request, response) => {
+        response.json(publicSecondaryAiConfig());
+    }));
+
+    router.post('/secondary-ai/config', wrapRoute(async (request, response) => {
+        const body = request.body || {};
+        const current = settings.secondaryAi;
+        const suppliedKey = typeof body.apiKey === 'string' ? cleanText(body.apiKey, 4096) : '';
+        const apiKey = body.clearApiKey === true ? '' : suppliedKey || current.apiKey;
+        const next = normalizeSecondaryAi({
+            enabled: body.enabled === true,
+            name: body.name,
+            url: body.url,
+            apiKey,
+            model: body.model,
+            maxOutputTokens: body.maxOutputTokens,
+            modules: body.modules,
+        });
+        if (next.enabled && (!next.url || !next.model)) {
+            throw new PublicError('启用副 API 前必须填写 API URL 和模型名');
+        }
+        settings.secondaryAi = next;
+        writeConfig();
+
+        let test = null;
+        if (body.test === true) {
+            try {
+                test = { ok: true, models: await fetchSecondaryAiModels() };
+            } catch (error) {
+                test = {
+                    ok: false,
+                    error: cleanText(error?.message, 500) || '副 API 连接测试失败',
+                };
+            }
+        }
+        response.json({ config: publicSecondaryAiConfig(), test });
+    }));
+
+    router.post('/secondary-ai/generate', wrapRoute(async (request, response) => {
+        const task = cleanText(request.body?.task, 40);
+        if (!SECONDARY_AI_TASKS.has(task)) {
+            throw new PublicError('副 API 模块无效');
+        }
+        const text = await generateWithSecondaryAi({
+            task,
+            prompt: request.body?.prompt,
+            maxOutputTokens: request.body?.maxOutputTokens,
+        });
+        response.json({ text, model: settings.secondaryAi.model });
+    }));
+
     router.get('/status', wrapRoute(async (_request, response) => {
         const { accountId, account } = getActiveAccount();
         const cookie = accountCookie(account);
@@ -1470,6 +1738,7 @@ export async function init(router) {
             activeAccountId: accountId,
             accounts: publicAccounts(),
             neteaseApi: describeNeteaseApiService(),
+            secondaryAi: publicSecondaryAiConfig(),
         });
     }));
 
