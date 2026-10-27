@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any
 
 
-SERVICE_VERSION = "1.1.0"
+SERVICE_VERSION = "1.2.0"
 HOST = os.environ.get("NETEASE_NATIVE_SERVICE_HOST", "127.0.0.1").strip()
 PORT = int(os.environ.get("NETEASE_NATIVE_SERVICE_PORT", "3472"))
 TOKEN = os.environ.get("NETEASE_NATIVE_SERVICE_TOKEN", "").strip()
@@ -464,6 +464,7 @@ def _client_state(websocket: WebSocket) -> dict[str, Any]:
   const roomStore = store["async:listenTogether"] || {};
   const room = roomStore.roomInfo || {};
   const playing = store.playing || {};
+  const current = playing.curPlaying || {};
   return {
     ready: Boolean(roomStore),
     status: utility.utilStatus,
@@ -472,10 +473,16 @@ def _client_state(websocket: WebSocket) -> dict[str, Any]:
     creatorId: String(room.creatorId || ""),
     hostUid: String((store.host || {}).uid || ""),
     songId: String(
-      playing.resourceTrackId
-      || (playing.curPlaying || {}).resourceId
+      current.resourceId
+      || current.trackId
+      || current.songId
+      || playing.resourceTrackId
+      || playing.currentTrackId
+      || playing.songId
       || ""
-    )
+    ),
+    playProgress: Number(playing.progress || current.progress || 0) || 0,
+    playStatus: String(playing.playStatus || playing.status || "")
   };
 })()
 """.replace("__CORE__", str(ids["core"])).replace(
@@ -796,8 +803,9 @@ def _room_state_on_client(websocket: WebSocket) -> dict[str, Any]:
     trackIds: (playlist.displayTrackIds || []).map(String),
     randomTrackIds: (playlist.randomTrackIds || []).map(String),
     currentSongId: String(
-      latest.targetSongId
-      || (playing.curPlaying || {}).resourceId
+      (playing.curPlaying || {}).resourceId
+      || playing.resourceTrackId
+      || latest.targetSongId
       || ""
     ),
     commandType: String(latest.commandType || ""),

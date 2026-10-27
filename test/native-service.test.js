@@ -54,7 +54,7 @@ test('native service exposes health and requires its bearer token', {
     assert.deepEqual(await health.json(), {
         ok: true,
         service: 'netease-companion-native',
-        version: '1.1.0',
+        version: '1.2.0',
     });
 
     const unauthorized = await fetch(`http://127.0.0.1:${port}/v1/status`);

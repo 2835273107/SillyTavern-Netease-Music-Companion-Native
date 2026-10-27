@@ -1656,7 +1656,8 @@ export async function init(router) {
             album: cleanText(rawSong.al?.name || rawSong.album?.name, 200),
             duration: Number(rawSong.dt || rawSong.duration) || 0,
             coverUrl: cleanText(rawSong.al?.picUrl || rawSong.album?.picUrl, 1000),
-            progress: Number(client.progress) || 0,
+            progress: Number(client.playProgress ?? client.progress) || 0,
+            playStatus: cleanText(client.playStatus, 40),
             source: 'native-client',
         });
     }));

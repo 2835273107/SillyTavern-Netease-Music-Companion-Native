@@ -112,8 +112,12 @@ function activateTab(tab, { persist = true } = {}) {
     }
     if (selected === 'together') {
         startMessagePolling();
+        if (element('nmcnativeTogetherMode')?.value === 'native' || state.inTogetherRoom) {
+            startTogetherPolling();
+        }
     } else {
         stopMessagePolling();
+        stopTogetherPolling();
     }
 }
 
@@ -617,6 +621,11 @@ function resetTogetherPanel() {
     const playlist = element('nmcnativeTogetherPlaylist');
     if (playlist) {
         playlist.replaceChildren(option('', '— 刷新房间歌单后选择 —'));
+    }
+    renderRoomPlaylistChoices();
+    const playlistSearch = element('nmcnativeTogetherPlaylistSearch');
+    if (playlistSearch) {
+        playlistSearch.value = '';
     }
     const invite = element('nmcnativeInviteLink');
     if (invite) {
@@ -1836,6 +1845,7 @@ function renderRoomPlaylist(data) {
     state.roomPlaylist = Array.isArray(data?.songs) ? data.songs : [];
     state.roomPlaylistCurrentId = String(data?.currentSongId || '');
     const select = element('nmcnativeTogetherPlaylist');
+    const previousSelection = select?.value || state.roomPlaylistCurrentId;
     if (select) {
         select.replaceChildren(option('', state.roomPlaylist.length
             ? '— 选择房间歌曲 —'
@@ -1844,8 +1854,11 @@ function renderRoomPlaylist(data) {
             const marker = String(song.id) === state.roomPlaylistCurrentId ? '（当前）' : '';
             select.append(option(song.id, `${song.name}${song.artist ? ` · ${song.artist}` : ''}${marker}`));
         }
-        if (state.roomPlaylistCurrentId && state.roomPlaylist.some(song => String(song.id) === state.roomPlaylistCurrentId)) {
-            select.value = state.roomPlaylistCurrentId;
+        const desiredSelection = state.roomPlaylist.some(song => String(song.id) === String(previousSelection))
+            ? previousSelection
+            : state.roomPlaylistCurrentId;
+        if (desiredSelection && state.roomPlaylist.some(song => String(song.id) === String(desiredSelection))) {
+            select.value = String(desiredSelection);
         }
     }
     setText(
@@ -1854,12 +1867,89 @@ function renderRoomPlaylist(data) {
             ? `房间歌单：${state.roomPlaylist.length} 首${data?.playStatus ? ` · ${data.playStatus}` : ''}`
             : '房间歌单为空',
     );
+    renderRoomPlaylistChoices();
     const toggle = element('nmcnativeTogetherToggle');
     if (toggle) {
         toggle.textContent = String(data?.playStatus || '').toUpperCase() === 'PAUSE'
             ? '继续播放'
             : '暂停';
     }
+}
+
+function renderRoomPlaylistChoices() {
+    const list = element('nmcnativeTogetherPlaylistList');
+    const select = element('nmcnativeTogetherPlaylist');
+    if (!list || !select) {
+        return;
+    }
+    const query = element('nmcnativeTogetherPlaylistSearch')?.value || '';
+    const filtered = state.roomPlaylist.filter(song => trackMatches(song, query));
+    list.replaceChildren();
+    if (!state.roomPlaylist.length) {
+        const empty = document.createElement('p');
+        empty.className = 'nmcnative-list-empty';
+        empty.textContent = '房间歌单为空';
+        list.append(empty);
+        return;
+    }
+    if (!filtered.length) {
+        const empty = document.createElement('p');
+        empty.className = 'nmcnative-list-empty';
+        empty.textContent = '没有匹配的房间歌曲';
+        list.append(empty);
+        return;
+    }
+    filtered.forEach((song, index) => {
+        const row = document.createElement('button');
+        row.type = 'button';
+        row.className = 'nmcnative-track-choice';
+        row.dataset.songId = String(song.id);
+        row.setAttribute('role', 'option');
+        const selected = String(song.id) === String(select.value || '');
+        const current = String(song.id) === String(state.roomPlaylistCurrentId || '');
+        row.classList.toggle('selected', selected);
+        row.classList.toggle('current', current);
+        row.setAttribute('aria-selected', String(selected));
+
+        const number = document.createElement('span');
+        number.className = 'nmcnative-track-number';
+        number.textContent = String(index + 1).padStart(2, '0');
+        const body = document.createElement('span');
+        body.className = 'nmcnative-track-body';
+        const name = document.createElement('span');
+        name.className = 'nmcnative-track-name';
+        name.textContent = song.name || '未知歌曲';
+        const meta = document.createElement('span');
+        meta.className = 'nmcnative-track-meta';
+        meta.textContent = [
+            song.artist || '未知歌手',
+            song.album || '',
+            formatTrackDuration(song.duration),
+        ].filter(Boolean).join(' · ');
+        const stateLabel = document.createElement('span');
+        stateLabel.className = 'nmcnative-track-state';
+        stateLabel.textContent = current
+            ? '当前'
+            : selected ? '已选' : '选择';
+        body.append(name, meta);
+        row.append(number, body, stateLabel);
+        row.addEventListener('click', () => {
+            select.value = String(song.id);
+            list.querySelectorAll('.nmcnative-track-choice').forEach(item => {
+                const isSelected = item.dataset.songId === String(song.id);
+                const isCurrent = item.dataset.songId === state.roomPlaylistCurrentId;
+                item.classList.toggle('selected', isSelected);
+                item.setAttribute('aria-selected', String(isSelected));
+                const itemState = item.querySelector('.nmcnative-track-state');
+                if (itemState) {
+                    itemState.textContent = isCurrent
+                        ? '当前'
+                        : isSelected ? '已选' : '选择';
+                }
+            });
+        });
+        list.append(row);
+    });
 }
 
 async function refreshRoomPlaylist() {
@@ -2221,6 +2311,34 @@ async function refreshTogetherState() {
     if (!state.togetherEnabled) {
         return;
     }
+    const mode = element('nmcnativeTogetherMode')?.value || 'local';
+    if (mode === 'native') {
+        try {
+            const nativeState = await api('/together/native/status');
+            const client = nativeState?.details?.client || {};
+            if (nativeState.running && client.available) {
+                const roomActive = Boolean(client.roomId)
+                    && ['waiting', 'togetherOwner', 'together'].includes(String(client.status || ''));
+                state.inTogetherRoom = roomActive;
+                setText(
+                    'nmcnativeTogetherRoom',
+                    roomActive
+                        ? '已加入一起听房间 · 原生客户端'
+                        : '原生服务已连接，当前未加入一起听房间',
+                );
+                if (roomActive) {
+                    await refreshRoomPlaylist().catch(() => {});
+                    if (extension_settings[EXTENSION_KEY]?.activeTab === 'together'
+                        && !state.togetherPollTimer) {
+                        startTogetherPolling();
+                    }
+                }
+                return;
+            }
+        } catch {
+            // Fall through to the local reverse status when native state is unavailable.
+        }
+    }
     const result = await api('/together/status');
     state.inTogetherRoom = result.inRoom === true;
     if (result.inRoom) {
@@ -2273,13 +2391,22 @@ async function refreshNativeServiceState({ start = false } = {}) {
 async function refreshCurrentTogetherSong({ startNative = false } = {}) {
     const mode = element('nmcnativeTogetherMode')?.value || 'local';
     const errors = [];
+    const applyRefreshedSong = song => {
+        const previousSongId = String(state.currentSong?.songId || '');
+        renderTogetherSong(song);
+        const nextSongId = String(song?.songId || '');
+        if (nextSongId
+            && (previousSongId !== nextSongId || state.roomPlaylistCurrentId !== nextSongId)) {
+            void refreshRoomPlaylist().catch(() => {});
+        }
+    };
     if (mode === 'native') {
         try {
             if (startNative) {
                 await api('/together/native/start', { method: 'POST', body: {} });
             }
             const song = await api('/together/native/now-playing');
-            renderTogetherSong(song);
+            applyRefreshedSong(song);
             state.togetherPollFailures = 0;
             await refreshNativeServiceState().catch(() => {});
             return song;
@@ -2289,7 +2416,7 @@ async function refreshCurrentTogetherSong({ startNative = false } = {}) {
     }
     try {
         const song = await api('/together/now-playing');
-        renderTogetherSong(song);
+        applyRefreshedSong(song);
         state.togetherPollFailures = 0;
         return song;
     } catch (error) {
@@ -2938,6 +3065,9 @@ function injectStyles() {
         #netease-music-companion-native .nmcnative-track-choice.selected {
             border-color: color-mix(in srgb, var(--SmartThemeQuoteColor) 38%, var(--SmartThemeBorderColor));
             background: color-mix(in srgb, var(--SmartThemeQuoteColor) 15%, transparent);
+        }
+        #netease-music-companion-native .nmcnative-track-choice.current {
+            box-shadow: inset 3px 0 color-mix(in srgb, var(--SmartThemeQuoteColor) 72%, transparent);
         }
         #netease-music-companion-native .nmcnative-playlist-mark {
             display: grid;
@@ -3733,12 +3863,16 @@ function panelHtml() {
                 <details class="nmcnative-details">
                     <summary>房间歌单</summary>
                     <div class="nmcnative-field">
-                        <label for="nmcnativeTogetherPlaylist">选择房间歌曲</label>
-                        <select id="nmcnativeTogetherPlaylist">
-                            <option value="">— 刷新房间歌单后选择 —</option>
-                        </select>
+                        <label for="nmcnativeTogetherPlaylistSearch">筛选房间歌曲</label>
+                        <input id="nmcnativeTogetherPlaylistSearch" type="search" placeholder="歌曲、歌手或专辑">
                     </div>
                     <p id="nmcnativeTogetherPlaylistState" class="nmcnative-status-line">房间歌单尚未读取</p>
+                    <div id="nmcnativeTogetherPlaylistList" class="nmcnative-track-list" role="listbox" aria-label="一起听房间歌曲">
+                        <p class="nmcnative-list-empty">刷新房间歌单后显示歌曲</p>
+                    </div>
+                    <select id="nmcnativeTogetherPlaylist" hidden aria-hidden="true">
+                        <option value="">— 刷新房间歌单后选择 —</option>
+                    </select>
                     <div class="nmcnative-actions">
                         <button id="nmcnativeAddToRoomPlaylist" type="button">添加播放器选中歌曲</button>
                         <button id="nmcnativePlayRoomSong" class="nmcnative-primary" type="button">播放选中歌曲</button>
@@ -3892,7 +4026,16 @@ function bindEvents() {
     element('nmcnativeTogetherMode').addEventListener('change', event => {
         extension_settings[EXTENSION_KEY].togetherCreationMode = event.target.value;
         saveSettingsDebounced();
-        void withBusy('正在检查一起听服务...', () => refreshNativeServiceState({ start: event.target.value === 'native' }));
+        void withBusy(
+            '正在检查一起听服务...',
+            () => refreshNativeServiceState({ start: event.target.value === 'native' }),
+        ).then(() => {
+            if (event.target.value === 'native') {
+                startTogetherPolling();
+            } else if (!state.inTogetherRoom) {
+                stopTogetherPolling();
+            }
+        });
     });
     element('nmcnativeBackendUrl').addEventListener('change', event => {
         extension_settings[EXTENSION_KEY].backendUrl = event.target.value.trim() || DEFAULT_BACKEND;
@@ -4127,6 +4270,9 @@ function bindEvents() {
     });
     element('nmcnativeRefreshRoomPlaylist').addEventListener('click', () => {
         void withBusy('正在读取一起听房间歌单...', refreshRoomPlaylist);
+    });
+    element('nmcnativeTogetherPlaylistSearch').addEventListener('input', () => {
+        renderRoomPlaylistChoices();
     });
     element('nmcnativeAddToRoomPlaylist').addEventListener('click', () => {
         void withBusy('正在添加歌曲到房间...', addSelectedPlayerSongToRoom);

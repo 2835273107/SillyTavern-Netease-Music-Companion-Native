@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.9.2
+
+- Read the desktop client's actual `curPlaying` song before waiting for the
+  potentially stale room play command.
+- Kept native song polling active while the Listen Together tab is open and
+  refreshed the room playlist when the current song changes.
+- Replaced the Listen Together room-song selector with a filterable song list
+  showing the current track.
+- Added no-store requests to the native bridge to avoid stale client state.
+
 ## 1.9.1
 
 - Added native-client current-song refresh with on-demand native service start

@@ -110,6 +110,7 @@ export class TogetherBridge {
         }
         const response = await fetch(`${service.baseUrl}${route}`, {
             method,
+            cache: 'no-store',
             headers: {
                 Authorization: `Bearer ${service.token}`,
                 ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
