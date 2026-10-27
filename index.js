@@ -123,6 +123,45 @@ function stripReasoningArtifacts(value) {
     return text.trim();
 }
 
+function sanitizeGeneratedText(value) {
+    let text = stripReasoningArtifacts(value);
+    text = text
+        .replace(/&nbsp;|&#160;/gi, ' ')
+        .replace(/&lt;/gi, '<')
+        .replace(/&gt;/gi, '>')
+        .replace(/&quot;/gi, '"')
+        .replace(/&#39;|&apos;/gi, "'")
+        .replace(/&amp;/gi, '&')
+        .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1>/gi, ' ')
+        .replace(/<br\s*\/?>/gi, '\n')
+        .replace(/<\/?[a-z][^>]*>/gi, ' ')
+        .replace(/<[a-z][^>]*$/gi, ' ')
+        .replace(/<!DOCTYPE[^>]*>/gi, ' ')
+        .replace(/```(?:html|markdown|md)?\s*/gi, '')
+        .replace(/```/g, '')
+        .replace(/[ \t]+/g, ' ')
+        .replace(/ *\n */g, '\n')
+        .replace(/\n{3,}/g, '\n\n');
+    return text.trim();
+}
+
+function truncateGeneratedText(value, limit) {
+    const text = sanitizeGeneratedText(value);
+    const maxLength = Math.max(1, Number(limit) || 1);
+    if (text.length <= maxLength) {
+        return text;
+    }
+    const head = text.slice(0, maxLength);
+    let cut = 0;
+    for (const match of head.matchAll(/[。！？!?…]+[”’"'」』）】]*|[；;]/g)) {
+        cut = match.index + match[0].length;
+    }
+    if (cut >= Math.min(30, maxLength * 0.4)) {
+        return head.slice(0, cut).trim();
+    }
+    return head.trim();
+}
+
 function backendBase() {
     const configured = String(extension_settings[EXTENSION_KEY]?.backendUrl || DEFAULT_BACKEND).trim();
     return (configured || DEFAULT_BACKEND).replace(/\/+$/, '');
@@ -1488,7 +1527,7 @@ async function playNextPlayerSong({ automatic = false } = {}) {
             try {
                 const reply = await quiet(
                     `你是 {{char}}。${currentSongContext.text}\n请根据你的人格、背景、最近对话以及当前歌曲歌词，从以下候选歌曲及其歌词中选择下一首：${JSON.stringify(candidates)}。选择理由必须结合歌词，禁止只根据歌名选择或编造歌词。输出严格 JSON：{"songId":"候选中的歌曲ID","reason":"一句角色口吻短句"}。只输出 JSON。`,
-                    { candidateGuard: false, task: 'autoNext' },
+                    { candidateGuard: false, task: 'autoNext', structured: true },
                 );
                 const parsed = parseJsonReply(reply);
                 selected = state.playerQueue.find(
@@ -1619,7 +1658,7 @@ function renderTogetherReplyLog() {
     log.replaceChildren();
     const characterName = activeCharacterName();
     for (const reply of state.generatedTogetherReplies) {
-        const text = stripReasoningArtifacts(typeof reply === 'string' ? reply : reply.text);
+        const text = sanitizeGeneratedText(typeof reply === 'string' ? reply : reply.text);
         const status = typeof reply === 'string' ? 'sent' : reply.status;
         const row = document.createElement('p');
         row.className = 'nmcnative-sent-message';
@@ -1742,7 +1781,7 @@ function renderMessageContacts() {
         const preview = document.createElement('span');
         preview.className = 'nmcnative-contact-preview';
         preview.textContent = `${contact.lastFromSelf ? `${characterName}：` : ''}${
-            stripReasoningArtifacts(contact.lastMessage) || '暂无文字消息'
+            sanitizeGeneratedText(contact.lastMessage) || '暂无文字消息'
         }`;
         body.append(name, preview);
         const meta = document.createElement('span');
@@ -1791,7 +1830,7 @@ function renderTogetherMessageHistory() {
         ].filter(Boolean).join(' · ');
         const text = document.createElement('span');
         text.className = 'nmcnative-chat-text';
-        text.textContent = stripReasoningArtifacts(message.text);
+        text.textContent = sanitizeGeneratedText(message.text);
         bubble.append(meta, text);
         container.append(bubble);
     }
@@ -1904,16 +1943,16 @@ function parseCharacterMessages(reply) {
             .map(value => value.replace(/^[-*\d.、\s]+/, ''));
     }
     return values
-        .map(value => stripReasoningArtifacts(value)
+        .map(value => sanitizeGeneratedText(value)
             .replace(/^[“”"'「」]+|[“”"'「」]+$/g, '')
             .trim())
         .filter(Boolean)
         .slice(0, 3)
-        .map(value => value.slice(0, TOGETHER_REPLY_CHAR_LIMIT));
+        .map(value => truncateGeneratedText(value, TOGETHER_REPLY_CHAR_LIMIT));
 }
 
 async function sendCharacterPrivateMessage(message, contactId) {
-    const content = stripReasoningArtifacts(message).slice(0, 500);
+    const content = truncateGeneratedText(message, 500);
     if (!content) {
         throw new Error('没有可发送的私信内容');
     }
@@ -1951,7 +1990,7 @@ async function generateTogetherReply() {
         .slice(-12)
         .map(message => {
             const speaker = message.sender === 'contact' ? '{{user}}' : '{{char}}';
-            return `${speaker}：${stripReasoningArtifacts(message.text).replace(/\s+/g, ' ').slice(0, 260)}`;
+            return `${speaker}：${truncateGeneratedText(message.text, 260).replace(/\n+/g, ' ')}`;
         })
         .join('\n');
     const prompt = [
@@ -1969,6 +2008,7 @@ async function generateTogetherReply() {
         candidateGuard: false,
         responseLength: 300,
         task: 'private',
+        structured: true,
     });
     const messages = parseCharacterMessages(reply);
     if (!messages.length) {
@@ -1978,7 +2018,7 @@ async function generateTogetherReply() {
     const characterName = activeCharacterName();
     state.generatedTogetherReplies = messages.map(text => ({ text, status: 'pending' }));
     renderTogetherReplyLog();
-    const combinedMessage = messages.join('\n\n').slice(0, 500);
+    const combinedMessage = truncateGeneratedText(messages.join('\n\n'), 500);
     setConnectionState(`${characterName} 正在合并为一条私信发送...`, 'loading');
     try {
         await sendCharacterPrivateMessage(combinedMessage, contact.id);
@@ -2036,7 +2076,7 @@ async function speakCurrentSongToUser() {
         .slice(-8)
         .map(message => {
             const speaker = message.sender === 'contact' ? '{{user}}' : '{{char}}';
-            return `${speaker}：${stripReasoningArtifacts(message.text).replace(/\s+/g, ' ').slice(0, 180)}`;
+            return `${speaker}：${truncateGeneratedText(message.text, 180).replace(/\n+/g, ' ')}`;
         })
         .join('\n');
     const reply = await quiet([
@@ -2052,11 +2092,10 @@ async function speakCurrentSongToUser() {
         responseLength: 160,
         task: 'private',
     });
-    const content = stripReasoningArtifacts(reply)
+    const content = truncateGeneratedText(reply, SPEAK_SONG_CHAR_LIMIT)
         .replace(/^[“”"'「」]+|[“”"'「」]+$/g, '')
         .replace(/\s+/g, ' ')
-        .trim()
-        .slice(0, SPEAK_SONG_CHAR_LIMIT);
+        .trim();
     if (!content) {
         throw new Error(`${activeCharacterName()} 没有生成可发送的听歌短句`);
     }
@@ -2084,7 +2123,7 @@ async function speakCurrentSongToUser() {
 async function resendGeneratedTogetherMessage() {
     const messages = state.generatedTogetherReplies
         .map(reply => typeof reply === 'string' ? reply : reply.text)
-        .map(stripReasoningArtifacts)
+        .map(sanitizeGeneratedText)
         .filter(Boolean);
     if (!messages.length) {
         throw new Error('当前没有可重发的生成内容');
@@ -2098,7 +2137,7 @@ async function resendGeneratedTogetherMessage() {
         throw new Error('请先选择要发送到的网易云私信联系人');
     }
     const characterName = activeCharacterName();
-    const content = messages.join('\n\n').slice(0, 500);
+    const content = truncateGeneratedText(messages.join('\n\n'), 500);
     setConnectionState(`${characterName} 正在手动重发私信...`, 'loading');
     try {
         await sendCharacterPrivateMessage(content, contact.id);
@@ -2323,7 +2362,7 @@ function renderSongComments(data) {
         meta.className = 'nmcnative-comment-meta';
         meta.textContent = `${comment.nickname || '网易云用户'} · 赞 ${comment.likedCount || 0}`;
         const content = document.createElement('p');
-        content.textContent = stripReasoningArtifacts(comment.content);
+        content.textContent = sanitizeGeneratedText(comment.content);
         row.append(meta, content);
         container.append(row);
     }
@@ -2350,10 +2389,9 @@ async function postSongComment(songId, content) {
     if (state.commentingSongIds.has(commentKey)) {
         throw new Error('这首歌正在发布评论，请稍候');
     }
-    const normalizedContent = stripReasoningArtifacts(content)
+    const normalizedContent = truncateGeneratedText(content, SONG_COMMENT_CHAR_LIMIT)
         .replace(/\s+/g, ' ')
-        .trim()
-        .slice(0, SONG_COMMENT_CHAR_LIMIT);
+        .trim();
     if (!normalizedContent) {
         throw new Error('评论内容不能为空');
     }
@@ -2910,6 +2948,7 @@ async function quiet(prompt, {
     includeWorldbook = true,
     responseLength = null,
     task = '',
+    structured = false,
 } = {}) {
     if (typeof generateQuietPrompt !== 'function') {
         throw new Error('当前 SillyTavern 不支持后台静默生成');
@@ -2948,7 +2987,9 @@ async function quiet(prompt, {
                 'nmcnativeSecondaryAiStatus',
                 `已启用 · ${result.model || state.secondaryAiConfig.model} · 调用成功`,
             );
-            return stripReasoningArtifacts(result.text);
+            return structured
+                ? stripReasoningArtifacts(result.text)
+                : sanitizeGeneratedText(result.text);
         } catch (error) {
             setText(
                 'nmcnativeSecondaryAiStatus',
@@ -2957,7 +2998,9 @@ async function quiet(prompt, {
         }
     }
     const result = await generateQuietPrompt(options);
-    return stripReasoningArtifacts(result);
+    return structured
+        ? stripReasoningArtifacts(result)
+        : sanitizeGeneratedText(result);
 }
 
 async function generatePersonaPlan({ withName = true } = {}) {
@@ -2966,7 +3009,7 @@ async function generatePersonaPlan({ withName = true } = {}) {
         : '{"keywords":["1-3个搜索关键词"]}';
     const reply = await quiet(
         `你是 {{char}}。请根据你的人格、背景和最近对话，输出严格 JSON：${shape}。只输出 JSON，不要解释。`,
-        { task: 'playlist' },
+        { task: 'playlist', structured: true },
     );
     const parsed = parseJsonReply(reply);
     const keywords = (Array.isArray(parsed.keywords) ? parsed.keywords : [])
@@ -2990,7 +3033,7 @@ async function searchCandidates(keywords) {
 }
 
 function normalizeCharacterRecommendation(value, song) {
-    const reason = stripReasoningArtifacts(value)
+    const reason = sanitizeGeneratedText(value)
         .replace(/^[“”"'「」]+|[“”"'「」]+$/g, '')
         .trim();
     const analytical = /贴合|符合|体现|气质|人设|角色设定|这首适合/.test(reason);
@@ -3131,6 +3174,7 @@ reason 不是分析或第三人称评价，而是 {{char}} 当场直接对 {{use
 每首推荐语不超过 40 个中文字符，不同歌曲之间不要重复。
 输出严格 JSON：{"selected":[{"id":"候选ID","reason":"我对 {{user}} 说的推荐短句"}]}。只输出 JSON。`, {
         task: 'playlist',
+        structured: true,
     });
     const parsed = parseJsonReply(reply);
     const candidateIds = new Set(compact.map(song => song.id));
@@ -3174,7 +3218,7 @@ function renderOperationResult({ title, playlistName, selected = [], added = 0, 
         list.className = 'nmcnative-result-list';
         for (const song of selected) {
             const item = document.createElement('li');
-            const reason = stripReasoningArtifacts(song.reason);
+            const reason = truncateGeneratedText(song.reason, 40);
             item.textContent = song.name
                 ? `《${song.name}》${reason ? `：${reason}` : ''}`
                 : `${song.id}${reason ? `：${reason}` : ''}`;

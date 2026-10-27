@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.12.4
+
+- Removed model-generated HTML, style attributes, entities and truncated markup
+  from private messages and comments.
+- Replaced raw character-count cuts with sentence-aware shortening so generated
+  comments and messages do not end halfway through a sentence.
+- Separated structured JSON generation from plain-text cleanup, preventing HTML
+  removal from corrupting valid JSON responses.
+
 ## 1.12.3
 
 - Applied reasoning cleanup at every user-visible boundary, including private
