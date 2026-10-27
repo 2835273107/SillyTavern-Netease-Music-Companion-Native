@@ -661,13 +661,14 @@ function extractLoginCookies(body, setCookies) {
     };
 }
 
-function parseLyricSnippet(lyric = '') {
-    return String(lyric)
+function parseLyricSnippet(lyric = '', maxChars = 0) {
+    const snippet = String(lyric)
         .split(/\r?\n/)
         .map(line => line.replace(/^\[[^\]]+\]\s*/, '').trim())
         .filter(line => line && !/^\[[^\]]+\]$/.test(line) && !/^(作词|作曲|编曲|制作人|混音|母带|出品)\s*[:：]/.test(line))
-        .slice(0, 8)
+        .slice(0, 14)
         .join('\n');
+    return Number(maxChars) > 0 ? snippet.slice(0, maxChars) : snippet;
 }
 
 function normalizeTrackIds(input) {
@@ -690,6 +691,17 @@ function normalizeTrackIds(input) {
         truncated,
         originalUniqueCount: normalized.length,
     };
+}
+
+function normalizePlaylistPrivacy(value) {
+    if (typeof value === 'boolean') {
+        // NeteaseCloudMusicApi 4.x uses 0 for public and 10 for private.
+        return value ? '10' : '0';
+    }
+    if ([0, 10, '0', '10'].includes(value)) {
+        return String(value);
+    }
+    return '0';
 }
 
 async function resolveSongPlaybackUrl(songId, cookie, level = 'standard') {
@@ -988,8 +1000,15 @@ async function fetchPlaylistTrackIds(playlistId, cookie) {
     return [];
 }
 
-async function addTracksToPlaylist(playlistId, requestedIds, cookie) {
-    const existingIds = new Set(await fetchPlaylistTrackIds(playlistId, cookie));
+async function addTracksToPlaylist(
+    playlistId,
+    requestedIds,
+    cookie,
+    { skipExistingCheck = false } = {},
+) {
+    const existingIds = skipExistingCheck
+        ? new Set()
+        : new Set(await fetchPlaylistTrackIds(playlistId, cookie));
     const toAdd = requestedIds.filter(id => !existingIds.has(id));
     const skipped = requestedIds.length - toAdd.length;
     if (toAdd.length === 0) {
@@ -1010,6 +1029,20 @@ async function addTracksToPlaylist(playlistId, requestedIds, cookie) {
         throw new PublicError(cleanText(body?.message || body?.error, 240) || '添加歌曲失败', 502);
     }
     return { added: toAdd.length, skipped };
+}
+
+async function createPlaylist(name, privacy, cookie) {
+    const { body } = await requestNetease('/playlist/create', {
+        method: 'POST',
+        params: { name, privacy },
+        cookie,
+    });
+    const data = upstreamData(body) || {};
+    const playlistId = cleanText(data.id || data.playlist?.id || data.playlistId, 80);
+    if (!playlistId) {
+        throw new PublicError(cleanText(body?.message, 240) || '创建歌单失败', 502);
+    }
+    return { playlist_id: playlistId, name };
 }
 
 function normalizeSearchSongs(body) {
@@ -1502,7 +1535,10 @@ export async function init(router) {
             const lyricBody = lyricResponse.body || {};
             return {
                 ...song,
-                lyric_snippet: parseLyricSnippet(lyricBody?.lrc?.lyric || upstreamData(lyricBody)?.lrc?.lyric),
+                lyric_snippet: parseLyricSnippet(
+                    lyricBody?.lrc?.lyric || upstreamData(lyricBody)?.lrc?.lyric,
+                    700,
+                ),
             };
         }));
         response.json(lyrics.map(result => result.status === 'fulfilled' ? result.value : null).filter(Boolean));
@@ -1515,30 +1551,48 @@ export async function init(router) {
         if (!name) {
             throw new PublicError('name 不能为空');
         }
-
-        let privacy;
-        if (typeof request.body?.privacy === 'boolean') {
-            // NeteaseCloudMusicApi 4.x uses 0 for public and 10 for private.
-            privacy = request.body.privacy ? '10' : '0';
-        } else if ([0, 10, '0', '10'].includes(request.body?.privacy)) {
-            privacy = String(request.body.privacy);
-        } else {
-            privacy = '0';
-        }
-
-        const { body } = await requestNetease('/playlist/create', {
-            method: 'POST',
-            params: { name, privacy },
+        const created = await createPlaylist(
+            name,
+            normalizePlaylistPrivacy(request.body?.privacy),
             cookie,
-        });
-        const data = upstreamData(body) || {};
-        const playlistId = cleanText(data.id || data.playlist?.id || data.playlistId, 80);
-        if (!playlistId) {
-            throw new PublicError(cleanText(body?.message, 240) || '创建歌单失败', 502);
-        }
-        account.currentPlaylist = { id: playlistId, name };
+        );
+        account.currentPlaylist = { id: created.playlist_id, name };
         writeConfig();
-        response.json({ playlist_id: playlistId, name });
+        response.json(created);
+    }));
+
+    router.post('/create-playlist-with-tracks', wrapRoute(async (request, response) => {
+        const { account } = getActiveAccount();
+        const cookie = activeCookieOrThrow();
+        const name = cleanText(request.body?.name, 80);
+        if (!name) {
+            throw new PublicError('name 不能为空');
+        }
+        const trackIds = normalizeTrackIds(request.body?.track_ids);
+        if (trackIds.ids.length === 0) {
+            throw new PublicError('track_ids 不能为空');
+        }
+
+        const created = await createPlaylist(
+            name,
+            normalizePlaylistPrivacy(request.body?.privacy),
+            cookie,
+        );
+        // A newly created playlist is empty, so the duplicate preflight can be skipped.
+        const result = await addTracksToPlaylist(
+            created.playlist_id,
+            trackIds.ids,
+            cookie,
+            { skipExistingCheck: true },
+        );
+        account.currentPlaylist = { id: created.playlist_id, name: created.name };
+        writeConfig();
+        response.json({
+            ...created,
+            ...result,
+            track_ids: trackIds.ids,
+            ...(trackIds.truncated ? { message: 'track_ids 超过 20 个，已截断' } : {}),
+        });
     }));
 
     router.post('/add-tracks', wrapRoute(async (request, response) => {

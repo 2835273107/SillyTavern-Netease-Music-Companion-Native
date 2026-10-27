@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.11.0
+
+- Added a persisted private-message option for including or excluding current
+  song lyrics and translations. When disabled, lyric lookup is skipped.
+- Added target-playlist duplicate prevention using both song IDs and normalized
+  title/artist identity keys.
+- Passed a bounded list of existing playlist songs to the character and
+  explicitly prohibited selecting or commenting on those songs again.
+- Added per-account session guards against publishing multiple comments for the
+  same song.
+- Combined playlist creation and initial track addition into one frontend
+  request and removed the follow-up playlist refresh request.
+- Reused lyric snippets returned by candidate search instead of issuing one
+  extra lyric request per candidate.
+
 ## 1.10.0
 
 - Added managed NeteaseCloudMusicApi installation and automatic process

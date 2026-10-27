@@ -38,6 +38,7 @@ const state = {
     playlists: [],
     playerPlaylists: [],
     playerPlaylistTracks: [],
+    loadedPlaylistTracksId: '',
     playerSelectionSource: 'search',
     playerSource: 'playlist',
     playerQueue: [],
@@ -53,6 +54,8 @@ const state = {
     selectedMessageContactId: '',
     messageHistory: [],
     generatedTogetherReplies: [],
+    commentedSongIds: new Set(),
+    commentingSongIds: new Set(),
     characterNameListeners: [],
     panelObserver: null,
 };
@@ -83,6 +86,13 @@ function initializeSettings() {
     if (typeof extension_settings[EXTENSION_KEY].conversationTools !== 'boolean') {
         extension_settings[EXTENSION_KEY].conversationTools = false;
     }
+    if (typeof extension_settings[EXTENSION_KEY].includeTogetherLyrics !== 'boolean') {
+        extension_settings[EXTENSION_KEY].includeTogetherLyrics = true;
+    }
+}
+
+function privateGenerationLyricsEnabled() {
+    return extension_settings[EXTENSION_KEY]?.includeTogetherLyrics !== false;
 }
 
 function backendBase() {
@@ -493,6 +503,7 @@ function resetPlaylistControls() {
     state.playlists = [];
     state.playerPlaylists = [];
     state.playerPlaylistTracks = [];
+    state.loadedPlaylistTracksId = '';
     renderTargetPlaylistChoices();
     renderPlayerPlaylistChoices();
     renderPlayerPlaylistTrackChoices();
@@ -1095,6 +1106,7 @@ async function loadPlayerPlaylistTracks() {
     }
     const result = await api(`/player/playlist-tracks/${encodeURIComponent(playlistId)}?limit=500`);
     state.playerPlaylistTracks = Array.isArray(result.songs) ? result.songs : [];
+    state.loadedPlaylistTracksId = String(playlistId);
     state.playerSelectionSource = 'playlist';
     const select = element('nmcnativePlayerPlaylistTrack');
     if (select) {
@@ -1679,10 +1691,13 @@ async function generateTogetherReply() {
     if (!state.messageHistory.length) {
         throw new Error('当前聊天没有可回复的文字消息');
     }
+    const includeLyrics = privateGenerationLyricsEnabled();
     const currentSong = state.currentSong || state.playerSong;
-    const songContext = currentSong
-        ? (await songContextForGeneration(currentSong, { maxLyricChars: 6000 })).text
-        : '当前没有读取到正在播放的歌曲，也没有可用歌词。';
+    const songContext = includeLyrics
+        ? currentSong
+            ? (await songContextForGeneration(currentSong, { maxLyricChars: 6000 })).text
+            : '当前没有读取到正在播放的歌曲，也没有可用歌词。'
+        : '本次私信生成未启用歌词参考。只根据聊天记录、角色人设、世界书和预设回复；不要引用或编造歌词。';
     const conversation = state.messageHistory
         .slice(-12)
         .map(message => {
@@ -1694,7 +1709,9 @@ async function generateTogetherReply() {
         `你正在阅读 {{char}} 在网易云音乐与“${contact.name}”（对应当前 {{user}}）的私信聊天记录。`,
         '聊天记录中由当前网易云账号发出的消息都代表 {{char}}，不是 {{user}}。',
         songContext,
-        currentSong ? '如果提供了歌词，回复必须结合歌词中的具体意象、句子或情绪，禁止只复述歌名。' : '',
+        includeLyrics && currentSong
+            ? '如果提供了歌词，回复必须结合歌词中的具体意象、句子或情绪，禁止只复述歌名。'
+            : '',
         `聊天记录：\n${conversation}`,
         '请以 {{char}} 的身份，根据这段聊天接续回复 1 到 3 条连续的短句。每条都像真实私信，可分别表达情绪、回应和补充，不要重复，不要添加角色名前缀或动作说明。',
         `只输出严格 JSON：{"messages":["第一条","第二条"]}。每条不超过 ${TOGETHER_REPLY_CHAR_LIMIT} 个中文字符。`,
@@ -1752,7 +1769,16 @@ async function speakCurrentSongToUser() {
     if (!contact) {
         throw new Error('请先读取并选择一个网易云私信联系人');
     }
-    const songDetails = await songContextForGeneration(song, { maxLyricChars: 6000 });
+    const includeLyrics = privateGenerationLyricsEnabled();
+    const songDetails = includeLyrics
+        ? await songContextForGeneration(song, { maxLyricChars: 6000 })
+        : {
+            text: [
+                `歌曲：《${song?.name || song?.songName || song?.song_name || '未知歌曲'}》`,
+                song?.artist ? `歌手：${song.artist}` : '',
+                '本次私信生成未启用歌词参考。不要引用或编造歌词。',
+            ].filter(Boolean).join('\n'),
+        };
     const recentConversation = state.messageHistory
         .slice(-8)
         .map(message => {
@@ -1763,7 +1789,9 @@ async function speakCurrentSongToUser() {
     const reply = await quiet([
         `你正在和 {{user}} 一起听这首歌。`,
         songDetails.text,
-        '必须结合歌词中的具体意象、句子或情绪写这条短句，禁止只重复歌名或歌手。',
+        includeLyrics
+            ? '必须结合歌词中的具体意象、句子或情绪写这条短句，禁止只重复歌名或歌手。'
+            : '只根据歌曲名称、歌手和当前聊天表达这一刻的感受，不要引用或编造歌词。',
         recentConversation ? `最近的网易云私信：\n${recentConversation}` : '',
         `请以 {{char}} 的身份，写一句想直接私信给 {{user}} 的听歌短句。只写一句，不超过 ${SPEAK_SONG_CHAR_LIMIT} 个中文字符，不要加引号、角色名前缀或解释。`,
     ].filter(Boolean).join('\n\n'), {
@@ -2061,6 +2089,13 @@ async function loadSongComments() {
 }
 
 async function postSongComment(songId, content) {
+    const commentKey = commentSessionKey(songId);
+    if (state.commentedSongIds.has(commentKey)) {
+        throw new Error('本会话已经评论过这首歌，请选择另一首歌曲');
+    }
+    if (state.commentingSongIds.has(commentKey)) {
+        throw new Error('这首歌正在发布评论，请稍候');
+    }
     const normalizedContent = String(content || '')
         .replace(/\s+/g, ' ')
         .trim()
@@ -2068,12 +2103,32 @@ async function postSongComment(songId, content) {
     if (!normalizedContent) {
         throw new Error('评论内容不能为空');
     }
-    await api(`/song-comments/${encodeURIComponent(songId)}`, {
-        method: 'POST',
-        body: { content: normalizedContent },
-    });
-    await loadSongComments().catch(() => {});
-    return normalizedContent;
+    state.commentingSongIds.add(commentKey);
+    try {
+        await api(`/song-comments/${encodeURIComponent(songId)}`, {
+            method: 'POST',
+            body: { content: normalizedContent },
+        });
+        state.commentedSongIds.add(commentKey);
+        await loadSongComments().catch(() => {});
+        return normalizedContent;
+    } finally {
+        state.commentingSongIds.delete(commentKey);
+    }
+}
+
+function commentSessionKey(songId) {
+    return `${state.activeAccountId || 'account'}:${String(songId || '')}`;
+}
+
+function assertSongCommentAvailable(songId) {
+    const commentKey = commentSessionKey(songId);
+    if (state.commentedSongIds.has(commentKey)) {
+        throw new Error('本会话已经评论过这首歌，请选择另一首歌曲');
+    }
+    if (state.commentingSongIds.has(commentKey)) {
+        throw new Error('这首歌正在发布评论，请稍候');
+    }
 }
 
 async function characterCommentOnSong() {
@@ -2087,6 +2142,7 @@ async function characterCommentOnSong() {
     if (!song) {
         throw new Error('缺少歌曲信息');
     }
+    assertSongCommentAvailable(songId);
     const songDetails = await songContextForGeneration(song, { maxLyricChars: 6000 });
     const generated = await quiet(
         `你是 {{char}}。${songDetails.text}\n请完全以角色本人的人格、经历和说话方式，结合歌词中的具体意象、句子或情绪，写一段发布在网易云歌曲评论区的短评论，不超过 ${SONG_COMMENT_CHAR_LIMIT} 个中文字符。禁止只复述歌名，不要自称 AI，不要解释，不要加引号，只输出评论正文。`,
@@ -2143,6 +2199,7 @@ async function toolCommentSong(args = {}) {
     if (!song?.id) {
         throw new Error('当前没有可用于评论的歌曲');
     }
+    assertSongCommentAvailable(song.id);
     let content = String(args.content || '').trim();
     if (!content) {
         const songDetails = await songContextForGeneration(song, { maxLyricChars: 6000 });
@@ -2628,23 +2685,124 @@ function normalizeCharacterRecommendation(value, song) {
     return reason.slice(0, 40);
 }
 
-async function chooseSongs(candidates) {
-    if (!Array.isArray(candidates) || candidates.length === 0) {
+function normalizeSongMatchText(value) {
+    return String(value || '')
+        .normalize('NFKC')
+        .toLocaleLowerCase('zh-CN')
+        .replace(/[^\p{L}\p{N}]+/gu, '');
+}
+
+function songIdentityKeys(song) {
+    const keys = new Set();
+    const id = String(song?.id || song?.songId || '').trim();
+    if (id) {
+        keys.add(`id:${id}`);
+    }
+    const name = normalizeSongMatchText(song?.name || song?.songName || song?.song_name);
+    const artist = normalizeSongMatchText(song?.artist || song?.artists);
+    if (name) {
+        keys.add(`title:${name}|artist:${artist}`);
+        const baseName = normalizeSongMatchText(
+            String(song?.name || song?.songName || song?.song_name || '')
+                .replace(/[\(（\[【][^\)）\]】]*[\)）\]】]/g, ''),
+        );
+        if (baseName && baseName !== name) {
+            keys.add(`title:${baseName}|artist:${artist}`);
+        }
+    }
+    return keys;
+}
+
+function filterNewSongCandidates(candidates, existingTracks = []) {
+    const occupiedKeys = new Set();
+    for (const song of Array.isArray(existingTracks) ? existingTracks : []) {
+        songIdentityKeys(song).forEach(key => occupiedKeys.add(key));
+    }
+    const accepted = [];
+    for (const song of Array.isArray(candidates) ? candidates : []) {
+        const keys = [...songIdentityKeys(song)];
+        if (!keys.length || keys.some(key => occupiedKeys.has(key))) {
+            continue;
+        }
+        accepted.push(song);
+        keys.forEach(key => occupiedKeys.add(key));
+    }
+    return accepted;
+}
+
+function existingSongsPrompt(tracks, { maxChars = 5000, maxItems = 120 } = {}) {
+    const lines = [];
+    let usedChars = 0;
+    let skipped = 0;
+    for (const song of Array.isArray(tracks) ? tracks : []) {
+        if (lines.length >= maxItems) {
+            skipped += 1;
+            continue;
+        }
+        const line = `- ${song.name || song.songName || song.id || '未知歌曲'}${
+            song.artist ? ` · ${song.artist}` : ''
+        }`;
+        if (usedChars + line.length > maxChars) {
+            skipped += 1;
+            continue;
+        }
+        lines.push(line);
+        usedChars += line.length + 1;
+    }
+    if (!lines.length) {
+        return '当前目标歌单为空。';
+    }
+    return [
+        '当前目标歌单中已有以下歌曲。它们绝对不能再次被选为候选、重复添加或在本轮流程中评论：',
+        ...lines,
+        skipped ? `另有 ${skipped} 首未展开；即使未展开，也必须通过歌曲 ID 和歌名硬过滤，禁止重复。` : '',
+    ].filter(Boolean).join('\n');
+}
+
+async function loadCurrentPlaylistTracksForSelection() {
+    const playlistId = String(state.currentPlaylist?.id || '').trim();
+    if (!playlistId) {
+        throw new Error('当前没有歌单，请先点击「新建歌单」');
+    }
+    const selectedPlayerPlaylistId = String(element('nmcnativePlayerPlaylist')?.value || '');
+    if (
+        selectedPlayerPlaylistId === playlistId
+        && state.loadedPlaylistTracksId === playlistId
+    ) {
+        return state.playerPlaylistTracks;
+    }
+    try {
+        const result = await api(
+            `/player/playlist-tracks/${encodeURIComponent(playlistId)}?limit=1000`,
+        );
+        return Array.isArray(result.songs) ? result.songs : [];
+    } catch (error) {
+        throw new Error(`无法读取当前歌单歌曲，已停止选歌以避免重复添加：${error?.message || error}`);
+    }
+}
+
+async function chooseSongs(candidates, { existingPlaylistTracks = [] } = {}) {
+    const availableCandidates = filterNewSongCandidates(candidates, existingPlaylistTracks);
+    if (availableCandidates.length === 0) {
         return [];
     }
-    const compact = await Promise.all(candidates.map(async song => {
-        const lyrics = await getSongLyricsText(song, { maxChars: 700 });
+    const compact = await Promise.all(availableCandidates.map(async song => {
+        const lyrics = String(song.lyric_snippet || '').slice(0, 700)
+            || await getSongLyricsText(song, { maxChars: 700 });
         return {
             id: String(song.id),
             name: song.name,
             artist: song.artist,
-            lyrics: lyrics || song.lyric_snippet || '',
+            lyrics,
         };
     }));
+    const existingSongs = existingSongsPrompt(existingPlaylistTracks);
     const reply = await quiet(`你是 {{char}}。请从以下候选歌曲及其歌词中挑选想推荐给 {{user}} 的歌曲：${JSON.stringify(compact)}。
+${existingSongs}
 reason 不是分析或第三人称评价，而是 {{char}} 当场直接对 {{user}} 说的一句推荐语，必须自然延续你的人格、关系、预设语气和最近对话。
 每条 reason 必须是一句完整短句，并且同时包含第一人称“我”和对 {{user}} 说的“你”。
 禁止出现“贴合、符合、体现、气质、人设、角色设定、这首适合”等分析词，禁止解释为什么适合角色，禁止使用第三人称称呼 {{char}}。
+只能在上述候选中选歌；候选已经排除目标歌单现有歌曲及同名版本，禁止尝试选回、替换或评论这些已有歌曲。
 推荐语必须结合该歌曲歌词中的具体意象、句子或情绪；歌词为空时才可以只根据歌名和歌手推荐，禁止编造歌词。
 每首推荐语不超过 40 个中文字符，不同歌曲之间不要重复。
 输出严格 JSON：{"selected":[{"id":"候选ID","reason":"我对 {{user}} 说的推荐短句"}]}。只输出 JSON。`);
@@ -2699,22 +2857,24 @@ function renderOperationResult({ title, playlistName, selected = [], added = 0, 
     }
 }
 
-async function buildSelection() {
+async function buildSelection({ existingPlaylistTracks = [] } = {}) {
     const plan = await generatePersonaPlan({ withName: false });
     setConnectionState('正在搜索候选歌曲...', 'loading');
     const candidates = await searchCandidates(plan.keywords);
-    if (candidates.length === 0) {
-        return { plan, candidates, selected: [] };
+    const availableCandidates = filterNewSongCandidates(candidates, existingPlaylistTracks);
+    const skippedExisting = candidates.length - availableCandidates.length;
+    if (availableCandidates.length === 0) {
+        return { plan, candidates, availableCandidates, selected: [], skippedExisting };
     }
     setConnectionState('正在筛选候选歌曲...', 'loading');
-    const selectedIds = await chooseSongs(candidates);
-    const candidateMap = new Map(candidates.map(song => [String(song.id), song]));
+    const selectedIds = await chooseSongs(availableCandidates, { existingPlaylistTracks });
+    const candidateMap = new Map(availableCandidates.map(song => [String(song.id), song]));
     const selected = selectedIds.map(item => ({
         ...item,
         name: candidateMap.get(item.id)?.name || item.id,
         artist: candidateMap.get(item.id)?.artist || '',
     }));
-    return { plan, candidates, selected };
+    return { plan, candidates, availableCandidates, selected, skippedExisting };
 }
 
 async function runCreateFlow() {
@@ -2735,38 +2895,76 @@ async function runCreateFlow() {
         return;
     }
 
-    setConnectionState('正在创建歌单...', 'loading');
-    const created = await api('/create-playlist', {
+    setConnectionState('正在创建歌单并添加歌曲...', 'loading');
+    const created = await api('/create-playlist-with-tracks', {
         method: 'POST',
-        body: { name: plan.playlistName, privacy: false },
-    });
-    const added = await api('/add-tracks', {
-        method: 'POST',
-        body: { track_ids: selected.map(item => item.id) },
+        body: {
+            name: plan.playlistName,
+            privacy: false,
+            track_ids: selected.map(item => item.id),
+        },
     });
     const songMap = new Map(candidates.map(song => [String(song.id), song.name]));
     const enriched = selected.map(item => ({ ...item, name: songMap.get(item.id) || item.id }));
     state.currentPlaylist = { id: created.playlist_id, name: created.name };
     renderCurrentPlaylist(state.currentPlaylist);
-    await refreshPlaylists().catch(() => {});
+    upsertPlaylistLocally(created, enriched.length);
     renderTargetPlaylistStatus(`当前目标：${created.name}`);
     renderOperationResult({
         title: '已新建歌单',
         playlistName: created.name,
         selected: enriched,
-        added: Number(added.added) || 0,
-        skipped: Number(added.skipped) || 0,
-        message: added.message || '',
+        added: Number(created.added) || 0,
+        skipped: Number(created.skipped) || 0,
+        message: created.message || '',
     });
+}
+
+function upsertPlaylistLocally(playlist, trackCount) {
+    const playlistId = String(playlist?.playlist_id || '').trim();
+    if (!playlistId) {
+        return;
+    }
+    const item = {
+        id: playlistId,
+        name: String(playlist.name || '未命名歌单'),
+        trackCount: Math.max(0, Number(trackCount) || 0),
+        creator: '',
+        isLiked: false,
+    };
+    const replace = playlists => [
+        item,
+        ...(Array.isArray(playlists) ? playlists : []).filter(
+            existing => String(existing.id) !== playlistId,
+        ),
+    ];
+    state.playlists = replace(state.playlists);
+    state.playerPlaylists = replace(state.playerPlaylists);
+
+    const targetSelect = element('nmcnativeTargetPlaylist');
+    if (targetSelect) {
+        if (![...targetSelect.options].some(optionNode => optionNode.value === playlistId)) {
+            targetSelect.append(option(playlistId, `${item.name}（${item.trackCount} 首）`));
+        }
+        targetSelect.value = playlistId;
+    }
+    renderTargetPlaylistChoices();
+    renderPlayerPlaylistChoices();
+    updatePlaylistControls();
 }
 
 async function runAddToCurrentFlow() {
     if (!state.currentPlaylist?.id) {
         throw new Error('当前没有歌单，请先点击「新建歌单」');
     }
-    const { selected } = await buildSelection();
+    setConnectionState('正在读取目标歌单现有歌曲...', 'loading');
+    const existingPlaylistTracks = await loadCurrentPlaylistTracksForSelection();
+    const { selected, skippedExisting } = await buildSelection({ existingPlaylistTracks });
     if (selected.length === 0) {
-        setMessage(`没有找到符合 ${activeCharacterName()} 设定的歌曲，未添加。`, 'info');
+        setMessage(
+            `没有找到可添加的新歌${skippedExisting ? `（已排除 ${skippedExisting} 首歌单中已有的歌曲）` : ''}，未添加。`,
+            'info',
+        );
         return;
     }
     const added = await api('/add-tracks', {
@@ -2778,7 +2976,7 @@ async function runAddToCurrentFlow() {
         playlistName: state.currentPlaylist.name,
         selected,
         added: Number(added.added) || 0,
-        skipped: Number(added.skipped) || 0,
+        skipped: Number(added.skipped) + Number(skippedExisting || 0),
         message: added.message || '',
     });
 }
@@ -3910,7 +4108,11 @@ function panelHtml() {
                         <span id="nmcnativeTogetherMessageState" class="nmcnative-list-summary">正在读取网易云私信...</span>
                         <button id="nmcnativeRefreshTogetherMessages" type="button">刷新聊天记录</button>
                     </div>
-                    <p id="nmcnativeTogetherReplyContext" class="nmcnative-note" data-nmcnative-char-template="读取你在网易云平台的私信记录，{char} 会结合聊天内容、当前歌曲歌词、绑定人设和预设生成 1–3 段回复，并合并为一条多段私信发送。">读取你在网易云平台的私信记录，角色会结合聊天内容、当前歌曲歌词、绑定人设和预设生成 1–3 段回复，并合并为一条多段私信发送。</p>
+                    <p id="nmcnativeTogetherReplyContext" class="nmcnative-note" data-nmcnative-char-template="读取你在网易云平台的私信记录，{char} 会结合聊天内容、绑定人设和预设生成 1–3 段回复，并合并为一条多段私信发送。是否参考当前歌曲歌词由下方开关决定。">读取你在网易云平台的私信记录，角色会结合聊天内容、绑定人设和预设生成 1–3 段回复，并合并为一条多段私信发送。是否参考当前歌曲歌词由下方开关决定。</p>
+                    <label class="nmcnative-toggle nmcnative-toggle-wide">
+                        <input id="nmcnativeTogetherIncludeLyrics" type="checkbox">
+                        <span>私信生成时参考当前歌曲歌词与翻译</span>
+                    </label>
                     <div id="nmcnativeTogetherMessageContacts" class="nmcnative-contact-list" role="listbox" aria-label="网易云私信联系人">
                         <p class="nmcnative-list-empty">正在读取联系人...</p>
                     </div>
@@ -4254,6 +4456,16 @@ function bindEvents() {
     element('nmcnativeResendTogetherReply').addEventListener('click', () => {
         void withBusy(`${activeCharacterName()} 正在重发私信...`, resendGeneratedTogetherMessage);
     });
+    element('nmcnativeTogetherIncludeLyrics').addEventListener('change', event => {
+        extension_settings[EXTENSION_KEY].includeTogetherLyrics = event.target.checked;
+        saveSettingsDebounced();
+        setMessage(
+            event.target.checked
+                ? '私信生成将参考当前歌曲歌词与翻译。'
+                : '私信生成只使用聊天、人设、世界书和预设，不读取歌词。',
+            'info',
+        );
+    });
     element('nmcnativeRefreshTogetherMessages').addEventListener('click', () => {
         void withBusy('正在刷新网易云聊天记录...', async () => {
             await refreshTogetherMessageContacts();
@@ -4466,6 +4678,7 @@ async function initializePanel() {
     element('nmcnativeContinuousPlayback').checked = extension_settings[EXTENSION_KEY].continuousPlayback;
     element('nmcnativeCharacterAutoSelect').checked = extension_settings[EXTENSION_KEY].characterAutoSelect;
     element('nmcnativeConversationTools').checked = extension_settings[EXTENSION_KEY].conversationTools;
+    element('nmcnativeTogetherIncludeLyrics').checked = extension_settings[EXTENSION_KEY].includeTogetherLyrics;
     activateTab(extension_settings[EXTENSION_KEY].activeTab, { persist: false });
     activatePlayerSource(extension_settings[EXTENSION_KEY].playerSource, { persist: false });
     bindEvents();
