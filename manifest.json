@@ -6,7 +6,7 @@
   "js": "index.js",
   "css": "",
   "author": "2835273107",
-  "version": "1.12.6",
+  "version": "1.12.7",
   "description": "独立版本：多账号网易云歌单、角色静默选歌和内置原生一起听服务。",
   "homePage": "https://github.com/2835273107/SillyTavern-Netease-Music-Companion-Native"
 }

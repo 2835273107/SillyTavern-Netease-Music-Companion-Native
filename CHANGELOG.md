@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.12.7
+
+- Expanded duplicate-song detection to canonical title matching.
+- Treats covers, acoustic/guitar versions, live versions, remasters, remixes,
+  instrumentals and artist-prefixed `Artist - Song` titles as the same song.
+- Prevented version variants from being passed to the character chooser.
+
 ## 1.12.6
 
 - Removed decorative footer lines such as the preset's

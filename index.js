@@ -3096,6 +3096,27 @@ function normalizeSongMatchText(value) {
         .replace(/[^\p{L}\p{N}]+/gu, '');
 }
 
+function normalizeSongCoreTitle(song) {
+    let title = String(song?.name || song?.songName || song?.song_name || '')
+        .normalize('NFKC')
+        .replace(/[\(（\[【{][^\)）\]】}]*[\)）\]】}]/g, ' ');
+    title = title.replace(/(?:cover|翻唱).*$/i, ' ');
+    const dashedParts = title.split(/\s+[-–—:：]\s+/).map(part => part.trim()).filter(Boolean);
+    const versionOnly = /^(?:吉他指弹版|指弹版|吉他版|钢琴版|伴奏版|纯音乐版|现场版|live版|remastered版|remaster版|remix版|重制版|重录版|新版|原版|demo版|acoustic版|instrumental版|dj版|版)$/i;
+    if (dashedParts.length > 1 && !versionOnly.test(normalizeSongMatchText(dashedParts.at(-1)))) {
+        title = dashedParts.at(-1);
+    }
+    let core = normalizeSongMatchText(title);
+    const artist = normalizeSongMatchText(song?.artist || song?.artists);
+    if (artist && core.startsWith(artist) && core.length > artist.length + 1) {
+        core = core.slice(artist.length);
+    }
+    return core.replace(
+        /(?:吉他指弹版|指弹版|吉他版|钢琴版|伴奏版|纯音乐版|现场版|live版|remastered版|remaster版|remix版|重制版|重录版|新版|原版|demo版|acoustic版|instrumental版|dj版|版)$/i,
+        '',
+    );
+}
+
 function songIdentityKeys(song) {
     const keys = new Set();
     const id = String(song?.id || song?.songId || '').trim();
@@ -3106,6 +3127,12 @@ function songIdentityKeys(song) {
     const artist = normalizeSongMatchText(song?.artist || song?.artists);
     if (name) {
         keys.add(`title:${name}|artist:${artist}`);
+        const coreTitle = normalizeSongCoreTitle(song);
+        if (coreTitle) {
+            // Versions, covers and artist-prefixed titles still identify the same song.
+            keys.add(`core-title:${coreTitle}`);
+            keys.add(`title:${coreTitle}|artist:${artist}`);
+        }
         const baseName = normalizeSongMatchText(
             String(song?.name || song?.songName || song?.song_name || '')
                 .replace(/[\(（\[【][^\)）\]】]*[\)）\]】]/g, ''),
