@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.12.3
+
+- Applied reasoning cleanup at every user-visible boundary, including private
+  message sending and resending, contact previews, chat history, comment
+  rendering, generated reply logs and song recommendation results.
+- Prevented old saved replies containing reasoning tags from being resent
+  verbatim.
+
 ## 1.12.2
 
 - Stripped `<thinking>`, `<analysis>`, `<reasoning>` and similar hidden blocks

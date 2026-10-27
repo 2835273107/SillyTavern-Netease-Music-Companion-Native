@@ -1619,7 +1619,7 @@ function renderTogetherReplyLog() {
     log.replaceChildren();
     const characterName = activeCharacterName();
     for (const reply of state.generatedTogetherReplies) {
-        const text = typeof reply === 'string' ? reply : reply.text;
+        const text = stripReasoningArtifacts(typeof reply === 'string' ? reply : reply.text);
         const status = typeof reply === 'string' ? 'sent' : reply.status;
         const row = document.createElement('p');
         row.className = 'nmcnative-sent-message';
@@ -1741,7 +1741,9 @@ function renderMessageContacts() {
         name.textContent = contact.name || '网易云用户';
         const preview = document.createElement('span');
         preview.className = 'nmcnative-contact-preview';
-        preview.textContent = `${contact.lastFromSelf ? `${characterName}：` : ''}${contact.lastMessage || '暂无文字消息'}`;
+        preview.textContent = `${contact.lastFromSelf ? `${characterName}：` : ''}${
+            stripReasoningArtifacts(contact.lastMessage) || '暂无文字消息'
+        }`;
         body.append(name, preview);
         const meta = document.createElement('span');
         meta.className = 'nmcnative-contact-meta';
@@ -1789,7 +1791,7 @@ function renderTogetherMessageHistory() {
         ].filter(Boolean).join(' · ');
         const text = document.createElement('span');
         text.className = 'nmcnative-chat-text';
-        text.textContent = message.text || '';
+        text.textContent = stripReasoningArtifacts(message.text);
         bubble.append(meta, text);
         container.append(bubble);
     }
@@ -1902,7 +1904,7 @@ function parseCharacterMessages(reply) {
             .map(value => value.replace(/^[-*\d.、\s]+/, ''));
     }
     return values
-        .map(value => String(value || '')
+        .map(value => stripReasoningArtifacts(value)
             .replace(/^[“”"'「」]+|[“”"'「」]+$/g, '')
             .trim())
         .filter(Boolean)
@@ -1911,7 +1913,7 @@ function parseCharacterMessages(reply) {
 }
 
 async function sendCharacterPrivateMessage(message, contactId) {
-    const content = String(message || '').trim().slice(0, 500);
+    const content = stripReasoningArtifacts(message).slice(0, 500);
     if (!content) {
         throw new Error('没有可发送的私信内容');
     }
@@ -1949,7 +1951,7 @@ async function generateTogetherReply() {
         .slice(-12)
         .map(message => {
             const speaker = message.sender === 'contact' ? '{{user}}' : '{{char}}';
-            return `${speaker}：${String(message.text || '').replace(/\s+/g, ' ').slice(0, 260)}`;
+            return `${speaker}：${stripReasoningArtifacts(message.text).replace(/\s+/g, ' ').slice(0, 260)}`;
         })
         .join('\n');
     const prompt = [
@@ -2034,7 +2036,7 @@ async function speakCurrentSongToUser() {
         .slice(-8)
         .map(message => {
             const speaker = message.sender === 'contact' ? '{{user}}' : '{{char}}';
-            return `${speaker}：${String(message.text || '').replace(/\s+/g, ' ').slice(0, 180)}`;
+            return `${speaker}：${stripReasoningArtifacts(message.text).replace(/\s+/g, ' ').slice(0, 180)}`;
         })
         .join('\n');
     const reply = await quiet([
@@ -2050,7 +2052,7 @@ async function speakCurrentSongToUser() {
         responseLength: 160,
         task: 'private',
     });
-    const content = String(reply)
+    const content = stripReasoningArtifacts(reply)
         .replace(/^[“”"'「」]+|[“”"'「」]+$/g, '')
         .replace(/\s+/g, ' ')
         .trim()
@@ -2082,7 +2084,7 @@ async function speakCurrentSongToUser() {
 async function resendGeneratedTogetherMessage() {
     const messages = state.generatedTogetherReplies
         .map(reply => typeof reply === 'string' ? reply : reply.text)
-        .map(text => String(text || '').trim())
+        .map(stripReasoningArtifacts)
         .filter(Boolean);
     if (!messages.length) {
         throw new Error('当前没有可重发的生成内容');
@@ -2321,7 +2323,7 @@ function renderSongComments(data) {
         meta.className = 'nmcnative-comment-meta';
         meta.textContent = `${comment.nickname || '网易云用户'} · 赞 ${comment.likedCount || 0}`;
         const content = document.createElement('p');
-        content.textContent = comment.content || '';
+        content.textContent = stripReasoningArtifacts(comment.content);
         row.append(meta, content);
         container.append(row);
     }
@@ -2988,7 +2990,7 @@ async function searchCandidates(keywords) {
 }
 
 function normalizeCharacterRecommendation(value, song) {
-    const reason = String(value || '')
+    const reason = stripReasoningArtifacts(value)
         .replace(/^[“”"'「」]+|[“”"'「」]+$/g, '')
         .trim();
     const analytical = /贴合|符合|体现|气质|人设|角色设定|这首适合/.test(reason);
@@ -3172,9 +3174,10 @@ function renderOperationResult({ title, playlistName, selected = [], added = 0, 
         list.className = 'nmcnative-result-list';
         for (const song of selected) {
             const item = document.createElement('li');
+            const reason = stripReasoningArtifacts(song.reason);
             item.textContent = song.name
-                ? `《${song.name}》${song.reason ? `：${song.reason}` : ''}`
-                : `${song.id}${song.reason ? `：${song.reason}` : ''}`;
+                ? `《${song.name}》${reason ? `：${reason}` : ''}`
+                : `${song.id}${reason ? `：${reason}` : ''}`;
             list.append(item);
         }
         node.append(list);
