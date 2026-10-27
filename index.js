@@ -18,6 +18,7 @@ const SPEAK_SONG_CHAR_LIMIT = 80;
 const SONG_COMMENT_CHAR_LIMIT = 120;
 const SONG_COMMENT_SENTENCE_OVERFLOW = 20;
 const REASONING_TAG_NAMES = 'thinking|think|analysis|reasoning|scratchpad';
+const DECORATIVE_FOOTER_PATTERN = /^[✧✦⋆☆★][^\n]{1,100}[✧✦⋆☆★]$/u;
 
 const state = {
     accounts: [],
@@ -143,7 +144,21 @@ function sanitizeGeneratedText(value) {
         .replace(/[ \t]+/g, ' ')
         .replace(/ *\n */g, '\n')
         .replace(/\n{3,}/g, '\n\n');
-    return text.trim();
+    const lines = text.trim().split('\n');
+    while (lines.length && DECORATIVE_FOOTER_PATTERN.test(lines.at(-1).trim())) {
+        lines.pop();
+    }
+    let cleaned = lines.join('\n').trim();
+    for (let index = 0; index < 3; index += 1) {
+        const withoutInlineFooter = cleaned
+            .replace(/\s*[✧✦⋆☆★][^\n]{1,100}[✧✦⋆☆★]\s*$/u, '')
+            .trim();
+        if (withoutInlineFooter === cleaned) {
+            break;
+        }
+        cleaned = withoutInlineFooter;
+    }
+    return cleaned;
 }
 
 function truncateGeneratedText(value, limit, {
@@ -2984,7 +2999,7 @@ async function quiet(prompt, {
         ? `当前 SillyTavern 预设是“${presetName}”。严格沿用该预设的语言、人称、角色口吻、格式和可用上下文规则，再完成下面的具体任务。`
         : '严格沿用当前 SillyTavern 预设的语言、人称、角色口吻、格式和可用上下文规则，再完成下面的具体任务。';
     const basePrompt = [worldbook, presetGuard, prompt].filter(Boolean).join('\n\n');
-    const outputGuard = '这是后台生成任务。只输出本次任务要求的最终结果，禁止输出 <thinking>、<analysis>、<reasoning>、思维链、分析过程或草稿。';
+    const outputGuard = '这是后台生成任务。只输出本次任务要求的最终结果，禁止输出 <thinking>、<analysis>、<reasoning>、思维链、分析过程或草稿；禁止模仿聊天记录或预设中的装饰性署名、固定尾注和结束标记。';
     const prepared = substituteParams(
         `${basePrompt}\n\n${outputGuard}${candidateGuard ? `\n\n${CANDIDATE_GUARD}` : ''}`,
     );

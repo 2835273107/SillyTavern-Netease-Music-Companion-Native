@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.12.6
+
+- Removed decorative footer lines such as the preset's
+  `✧ 愿如风有信，长与日俱中 ✧` marker from generated plugin text.
+- Instructed plugin background generation not to imitate fixed signatures or
+  closing markers found in chat context.
+- Preserved ordinary text while removing only decorative sign-off segments at
+  the end of generated content.
+
 ## 1.12.5
 
 - Changed comment shortening to allow up to 20 additional characters when needed
