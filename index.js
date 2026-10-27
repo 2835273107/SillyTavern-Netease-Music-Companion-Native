@@ -300,20 +300,12 @@ function renderTargetPlaylistStatus(message) {
 function updatePlaylistControls() {
     const canUsePlaylists = state.loggedIn && !state.busy;
     const select = element('nmcnativeTargetPlaylist');
-    const refresh = element('nmcnativeRefreshPlaylists');
-    const use = element('nmcnativeUsePlaylist');
     const search = element('nmcnativeTargetPlaylistSearch');
     if (select) {
         select.disabled = !canUsePlaylists;
     }
-    if (refresh) {
-        refresh.disabled = !canUsePlaylists;
-    }
     if (search) {
         search.disabled = !canUsePlaylists;
-    }
-    if (use) {
-        use.disabled = !canUsePlaylists || !select?.value;
     }
 }
 
@@ -449,8 +441,39 @@ function renderTargetPlaylistChoices() {
         playlists: state.playlists,
         query: element('nmcnativeTargetPlaylistSearch')?.value || '',
         onSelect: playlist => {
-            renderTargetPlaylistStatus(`已选择：${playlist.name || '未命名歌单'}，点击“使用选中歌单”生效。`);
-            updatePlaylistControls();
+            const previousPlaylistId = String(state.currentPlaylist?.id || '');
+            renderTargetPlaylistStatus(`正在切换：${playlist.name || '未命名歌单'}...`);
+            void withBusy('正在切换目标歌单...', async () => {
+                const playlistId = String(playlist.id || '').trim();
+                const name = String(playlist.name || '未命名歌单').trim();
+                if (!playlistId) {
+                    throw new Error('歌单 ID 无效');
+                }
+                if (String(state.currentPlaylist?.id || '') !== playlistId) {
+                    await api('/set-current-playlist', {
+                        method: 'POST',
+                        body: { playlist_id: playlistId, name },
+                    });
+                    state.currentPlaylist = { id: playlistId, name };
+                }
+                renderCurrentPlaylist(state.currentPlaylist);
+                if (select) {
+                    select.value = playlistId;
+                }
+                updatePlaylistChoiceSelection('nmcnativeTargetPlaylistList', playlistId);
+                renderTargetPlaylistStatus();
+                setConnectionState(`当前目标：${name}`, 'success');
+                setMessage(`当前目标已切换为「${name}」。`, 'success');
+                return { playlistId };
+            }).then(result => {
+                if (result) {
+                    return;
+                }
+                select.value = previousPlaylistId;
+                updatePlaylistChoiceSelection('nmcnativeTargetPlaylistList', previousPlaylistId);
+                renderTargetPlaylistStatus();
+                setConnectionState('切换目标歌单失败', 'warning');
+            });
         },
     });
     const visibleCount = state.playlists.filter(
@@ -4139,15 +4162,11 @@ function panelHtml() {
                 <select id="nmcnativeTargetPlaylist" hidden aria-hidden="true">
                         <option value="">— 选择一个已有歌单 —</option>
                 </select>
-                <div class="nmcnative-actions">
-                    <button id="nmcnativeRefreshPlaylists" type="button">刷新歌单列表</button>
-                    <button id="nmcnativeUsePlaylist" class="nmcnative-primary" type="button">使用选中歌单</button>
-                </div>
                 <p id="nmcnativeTargetPlaylistStatus" class="nmcnative-status-line">尚未选择目标歌单</p>
-                <p class="nmcnative-note" data-nmcnative-char-template="{char} 会先搜索候选歌曲，再根据角色设定选择。候选歌曲不会从当前歌单中读取。">角色会先搜索候选歌曲，再根据角色设定选择。候选歌曲不会从当前歌单中读取。</p>
+                <p class="nmcnative-note" data-nmcnative-char-template="点击歌单会立即切换为目标歌单，不需要再次确认。{char} 会先搜索候选歌曲，再根据角色设定选择；候选歌曲不会从当前歌单中读取。">点击歌单会立即切换为目标歌单，不需要再次确认。角色会先搜索候选歌曲，再根据角色设定选择；候选歌曲不会从当前歌单中读取。</p>
                 <div class="nmcnative-actions">
                     <button id="nmcnativeCreateByPersona" class="nmcnative-primary" type="button">新建歌单</button>
-                    <button id="nmcnativeAddToCurrent" type="button">添加歌曲到当前歌单</button>
+                    <button id="nmcnativeAddToCurrent" type="button">为当前歌单加歌</button>
                 </div>
             </section>
 
@@ -4336,35 +4355,6 @@ function bindEvents() {
     element('nmcnativeTargetPlaylistSearch').addEventListener('input', () => {
         renderTargetPlaylistChoices();
     });
-    element('nmcnativeRefreshPlaylists').addEventListener('click', () => {
-        void withBusy('正在刷新歌单...', async () => {
-            await refreshPlaylists();
-            setMessage('歌单列表已刷新。', 'success');
-        });
-    });
-    element('nmcnativeUsePlaylist').addEventListener('click', () => {
-        void withBusy('正在设置目标歌单...', async () => {
-            const select = element('nmcnativeTargetPlaylist');
-            const playlistId = select.value;
-            const selectedOption = select.selectedOptions[0];
-            if (!playlistId || !selectedOption) {
-                throw new Error('请先选择一个目标歌单');
-            }
-            const name = selectedOption.textContent
-                .replace(/（\d+ 首）（红心）?$/, '')
-                .replace(/（当前）$/, '')
-                .trim();
-            await api('/set-current-playlist', {
-                method: 'POST',
-                body: { playlist_id: playlistId, name },
-            });
-            state.currentPlaylist = { id: playlistId, name };
-            renderCurrentPlaylist(state.currentPlaylist);
-            renderTargetPlaylistStatus(`当前目标：${name}`);
-            setMessage(`已将「${name}」设为当前歌单。`, 'success');
-        });
-    });
-
     element('nmcnativeCreateByPersona').addEventListener('click', () => {
         void withBusy(`${activeCharacterName()} 正在策划歌单...`, () => runCreateFlow());
     });

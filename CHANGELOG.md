@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.11.1
+
+- Made target-playlist selection apply immediately when a playlist row is
+  clicked.
+- Removed the redundant “Use selected playlist” confirmation button.
+- Removed the separate playlist-refresh button; the list still loads on plugin
+  startup and after account changes.
+- Shortened the add-to-playlist action label to reduce crowding on mobile.
+
 ## 1.11.0
 
 - Added a persisted private-message option for including or excluding current
