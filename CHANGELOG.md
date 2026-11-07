@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.13.1
+
+- Floating lyrics are now transparent by default: only the lyric text is shown
+  over the page. Click the lyrics to show the background and controls, click
+  again or anywhere outside to hide them.
+- Rewrote the README with a quick start, feature overview and troubleshooting
+  table.
+
 ## 1.13.0
 
 - Reorganized the panel into clearer sections with icon tabs, section titles

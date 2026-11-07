@@ -1090,6 +1090,7 @@ function ensureFloatingLyrics() {
     node.hidden = true;
     node.setAttribute('role', 'status');
     node.setAttribute('aria-live', 'off');
+    node.title = '点击显示详细信息';
     node.innerHTML = `
         <div class="nmcnative-float-bar">
             <span class="nmcnative-float-grip" title="拖动移动位置" aria-hidden="true"><i class="fa-solid fa-grip-lines"></i></span>
@@ -1179,6 +1180,13 @@ function bindFloatingLyrics(node) {
             setLyricTranslation(!lyricTranslationEnabled());
         } else if (action === 'close') {
             setFloatingLyrics(false);
+        } else if (!action && !event.target.closest('.nmcnative-float-bar')) {
+            setFloatingLyricsExpanded(node, !node.classList.contains('nmcnative-float-expanded'));
+        }
+    });
+    document.addEventListener('pointerdown', event => {
+        if (!node.hidden && node.classList.contains('nmcnative-float-expanded') && !node.contains(event.target)) {
+            setFloatingLyricsExpanded(node, false);
         }
     });
     window.addEventListener('resize', () => {
@@ -1186,6 +1194,14 @@ function bindFloatingLyrics(node) {
             applyFloatingLyricsPosition(node);
         }
     });
+}
+
+function setFloatingLyricsExpanded(node, expanded) {
+    node.classList.toggle('nmcnative-float-expanded', Boolean(expanded));
+    node.title = expanded ? '点击歌词收起' : '点击显示详细信息';
+    if (node.classList.contains('nmcnative-float-placed')) {
+        applyFloatingLyricsPosition(node);
+    }
 }
 
 function renderFloatingLyrics() {
@@ -4868,7 +4884,26 @@ function injectStyles() {
             -webkit-backdrop-filter: blur(14px);
             text-align: center;
             user-select: none;
-            transition: opacity .2s ease;
+            cursor: pointer;
+            transition: opacity .2s ease, background-color .2s ease, border-color .2s ease, box-shadow .2s ease;
+        }
+        .nmcnative-floating-lyrics:not(.nmcnative-float-expanded) {
+            border-color: transparent;
+            background: transparent;
+            box-shadow: none;
+            backdrop-filter: none;
+            -webkit-backdrop-filter: none;
+        }
+        .nmcnative-floating-lyrics:not(.nmcnative-float-expanded) .nmcnative-float-bar {
+            display: none;
+        }
+        .nmcnative-floating-lyrics:not(.nmcnative-float-expanded) .nmcnative-float-line,
+        .nmcnative-floating-lyrics:not(.nmcnative-float-expanded) .nmcnative-float-translation {
+            text-shadow: 0 0 3px rgba(0, 0, 0, .85), 0 1px 8px rgba(0, 0, 0, .6);
+        }
+        .nmcnative-floating-lyrics:not(.nmcnative-float-expanded) .nmcnative-float-translation {
+            color: #fff;
+            opacity: .92;
         }
         .nmcnative-floating-lyrics.nmcnative-float-placed {
             bottom: auto;
@@ -4968,7 +5003,7 @@ function injectStyles() {
             .nmcnative-floating-lyrics .nmcnative-float-line {
                 font-size: 1rem;
             }
-            .nmcnative-floating-lyrics .nmcnative-float-bar {
+            .nmcnative-floating-lyrics.nmcnative-float-expanded .nmcnative-float-bar {
                 opacity: 1;
             }
             #netease-music-companion-native .nmcnative-tab-button {
