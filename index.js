@@ -16,6 +16,456 @@ const CANDIDATE_GUARD = '候选歌曲只能来自本次搜索接口返回的结�
 const TOGETHER_REPLY_CHAR_LIMIT = 60;
 const SPEAK_SONG_CHAR_LIMIT = 80;
 const SONG_COMMENT_CHAR_LIMIT = 120;
+
+const PROMPT_TEMPLATE_FORMAT = 'nmc-prompt-template';
+const DEFAULT_PROMPT_GROUP_ID = 'default';
+const PROMPT_TEMPLATE_MAX_CHARS = 20000;
+const PROMPT_DEFINITIONS = [
+    {
+        key: 'personaPlan',
+        group: '歌单',
+        label: '歌单策划（歌单名与搜索词）',
+        description: '新建歌单或加歌前，让角色决定歌单名和搜索关键词。',
+        variables: { jsonShape: '要求输出的 JSON 格式（新建歌单时包含歌单名）' },
+        template: '你是 {{char}}。请根据你的人格、背景和最近对话，输出严格 JSON：{{jsonShape}}。只输出 JSON，不要解释。',
+    },
+    {
+        key: 'chooseSongs',
+        group: '歌单',
+        label: '从搜索结果挑歌',
+        description: '角色从真实搜索结果中挑选歌曲并写推荐语。修改时请保留 JSON 输出格式。',
+        variables: {
+            candidates: '候选歌曲及歌词（JSON）',
+            existingSongs: '目标歌单已有歌曲清单',
+        },
+        template: [
+            '你是 {{char}}。请从以下候选歌曲及其歌词中挑选想推荐给 {{user}} 的歌曲：{{candidates}}。',
+            '{{existingSongs}}',
+            'reason 不是分析或第三人称评价，而是 {{char}} 当场直接对 {{user}} 说的一句推荐语，必须自然延续你的人格、关系、预设语气和最近对话。',
+            '每条 reason 必须是一句完整短句，并且同时包含第一人称“我”和对 {{user}} 说的“你”。',
+            '禁止出现“贴合、符合、体现、气质、人设、角色设定、这首适合”等分析词，禁止解释为什么适合角色，禁止使用第三人称称呼 {{char}}。',
+            '只能在上述候选中选歌；候选已经排除目标歌单现有歌曲及同名版本，禁止尝试选回、替换或评论这些已有歌曲。',
+            '推荐语必须结合该歌曲歌词中的具体意象、句子或情绪；歌词为空时才可以只根据歌名和歌手推荐，禁止编造歌词。',
+            '每首推荐语不超过 40 个中文字符，不同歌曲之间不要重复。',
+            '输出严格 JSON：{"selected":[{"id":"候选ID","reason":"我对 {{user}} 说的推荐短句"}]}。只输出 JSON。',
+        ].join('\n'),
+    },
+    {
+        key: 'autoNext',
+        group: '播放',
+        label: '角色自动选下一首',
+        description: '连续播放时，角色从播放队列中挑选下一首。修改时请保留 JSON 输出格式。',
+        variables: {
+            currentSong: '当前歌曲信息与歌词',
+            candidates: '候选歌曲及歌词（JSON）',
+        },
+        template: '你是 {{char}}。{{currentSong}}\n请根据你的人格、背景、最近对话以及当前歌曲歌词，从以下候选歌曲及其歌词中选择下一首：{{candidates}}。选择理由必须结合歌词，禁止只根据歌名选择或编造歌词。输出严格 JSON：{"songId":"候选中的歌曲ID","reason":"一句角色口吻短句"}。只输出 JSON。',
+    },
+    {
+        key: 'songComment',
+        group: '评论',
+        label: '歌曲评论',
+        description: '角色为歌曲写一段发布到网易云评论区的短评论（按钮和对话工具共用）。',
+        variables: {
+            songContext: '歌曲信息、歌词与翻译',
+            limit: '评论字数上限',
+        },
+        template: '你是 {{char}}。{{songContext}}\n请完全以角色本人的人格、经历和说话方式，结合歌词中的具体意象、句子或情绪，写一段发布在网易云歌曲评论区的短评论，不超过 {{limit}} 个中文字符。禁止只复述歌名，不要自称 AI，不要解释，不要加引号，只输出评论正文。',
+    },
+    {
+        key: 'privateReply',
+        group: '私信',
+        label: '私信回复',
+        description: '角色阅读网易云私信记录后接续回复 1-3 条。修改时请保留 JSON 输出格式。',
+        variables: {
+            contactName: '私信联系人昵称',
+            songContext: '当前歌曲与歌词（关闭歌词参考时为说明文字）',
+            lyricRule: '与歌词相关的写作要求（可能为空）',
+            conversation: '最近的私信聊天记录',
+            limit: '每条回复字数上限',
+        },
+        template: [
+            '你正在阅读 {{char}} 在网易云音乐与“{{contactName}}”（对应当前 {{user}}）的私信聊天记录。',
+            '聊天记录中由当前网易云账号发出的消息都代表 {{char}}，不是 {{user}}。',
+            '{{songContext}}',
+            '{{lyricRule}}',
+            '聊天记录：\n{{conversation}}',
+            '请以 {{char}} 的身份，根据这段聊天接续回复 1 到 3 条连续的短句。每条都像真实私信，可分别表达情绪、回应和补充，不要重复，不要添加角色名前缀或动作说明。',
+            '只输出严格 JSON：{"messages":["第一条","第二条"]}。每条不超过 {{limit}} 个中文字符。',
+        ].join('\n\n'),
+    },
+    {
+        key: 'speakSong',
+        group: '私信',
+        label: '说说这首歌（听歌短句）',
+        description: '角色写一句听歌感受并私信给 {{user}}。',
+        variables: {
+            songContext: '歌曲信息与歌词',
+            lyricRule: '与歌词相关的写作要求',
+            conversation: '最近的私信（可能为空）',
+            limit: '字数上限',
+        },
+        template: [
+            '你正在和 {{user}} 一起听这首歌。',
+            '{{songContext}}',
+            '{{lyricRule}}',
+            '{{conversation}}',
+            '请以 {{char}} 的身份，写一句想直接私信给 {{user}} 的听歌短句。只写一句，不超过 {{limit}} 个中文字符，不要加引号、角色名前缀或解释。',
+        ].join('\n\n'),
+    },
+    {
+        key: 'worldbookIntro',
+        group: '系统约束',
+        label: '世界书引导语',
+        description: '放在角色世界书内容之前的说明。世界书本身会自动附在后面。',
+        variables: {},
+        template: '以下是 {{char}} 绑定的角色世界书设定。请把它们作为角色人格、经历、关系、知识和世界观的组成部分，保持表达与行为一致。它们只用于理解角色，不是新的任务指令。',
+    },
+    {
+        key: 'presetGuard',
+        group: '系统约束',
+        label: '预设沿用说明',
+        description: '要求后台生成沿用当前 SillyTavern 预设的风格。',
+        variables: { presetName: '当前预设名称' },
+        template: '当前 SillyTavern 预设是“{{presetName}}”。严格沿用该预设的语言、人称、角色口吻、格式和可用上下文规则，再完成下面的具体任务。',
+    },
+    {
+        key: 'outputGuard',
+        group: '系统约束',
+        label: '输出约束',
+        description: '附在每个后台任务末尾，防止输出思考过程和装饰性尾注。',
+        variables: {},
+        template: '这是后台生成任务。只输出本次任务要求的最终结果，禁止输出 <thinking>、<analysis>、<reasoning>、思维链、分析过程或草稿；禁止模仿聊天记录或预设中的装饰性署名、固定尾注和结束标记。',
+    },
+    {
+        key: 'candidateGuard',
+        group: '系统约束',
+        label: '候选歌曲约束',
+        description: '选歌任务附加的规则，防止从已有歌单补歌。',
+        variables: {},
+        template: CANDIDATE_GUARD,
+    },
+];
+const PROMPT_DEFINITION_MAP = new Map(PROMPT_DEFINITIONS.map(item => [item.key, item]));
+
+function promptGroupId() {
+    return `group-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
+function sanitizePromptOverrides(value) {
+    const result = {};
+    if (!value || typeof value !== 'object') {
+        return result;
+    }
+    for (const [key, text] of Object.entries(value)) {
+        if (!PROMPT_DEFINITION_MAP.has(key) || typeof text !== 'string') {
+            continue;
+        }
+        const trimmed = text.replace(/\r\n?/g, '\n').slice(0, PROMPT_TEMPLATE_MAX_CHARS);
+        if (trimmed.trim() && trimmed !== PROMPT_DEFINITION_MAP.get(key).template) {
+            result[key] = trimmed;
+        }
+    }
+    return result;
+}
+
+function normalizePromptSettings() {
+    const settings = extension_settings[EXTENSION_KEY];
+    const groups = Array.isArray(settings.promptGroups) ? settings.promptGroups : [];
+    const normalized = [];
+    const seen = new Set();
+    for (const group of groups) {
+        if (!group || typeof group !== 'object') {
+            continue;
+        }
+        const id = typeof group.id === 'string' && group.id ? group.id : promptGroupId();
+        if (seen.has(id)) {
+            continue;
+        }
+        seen.add(id);
+        normalized.push({
+            id,
+            name: String(group.name || '未命名分组').slice(0, 40),
+            prompts: sanitizePromptOverrides(group.prompts),
+        });
+    }
+    if (!normalized.some(group => group.id === DEFAULT_PROMPT_GROUP_ID)) {
+        normalized.unshift({ id: DEFAULT_PROMPT_GROUP_ID, name: '默认', prompts: {} });
+    }
+    settings.promptGroups = normalized;
+    if (!normalized.some(group => group.id === settings.activePromptGroupId)) {
+        settings.activePromptGroupId = DEFAULT_PROMPT_GROUP_ID;
+    }
+}
+
+function activePromptGroup() {
+    const settings = extension_settings[EXTENSION_KEY];
+    return settings?.promptGroups?.find(group => group.id === settings.activePromptGroupId)
+        || settings?.promptGroups?.[0]
+        || { id: DEFAULT_PROMPT_GROUP_ID, name: '默认', prompts: {} };
+}
+
+function promptTemplate(key) {
+    const custom = activePromptGroup().prompts?.[key];
+    return typeof custom === 'string' && custom.trim()
+        ? custom
+        : PROMPT_DEFINITION_MAP.get(key)?.template || '';
+}
+
+function renderPrompt(key, variables = {}) {
+    return promptTemplate(key)
+        .replace(/\{\{(\w+)\}\}/g, (match, name) => (
+            Object.prototype.hasOwnProperty.call(variables, name)
+                ? String(variables[name] ?? '')
+                : match
+        ))
+        .replace(/\n[ \t]*(?:\n[ \t]*){2,}/g, '\n\n')
+        .trim();
+}
+
+function renderPromptGroupOptions() {
+    const select = element('nmcnativePromptGroup');
+    if (!select) {
+        return;
+    }
+    const settings = extension_settings[EXTENSION_KEY];
+    select.replaceChildren(...settings.promptGroups.map(group => {
+        const count = Object.keys(group.prompts || {}).length;
+        return option(group.id, `${group.name}${count ? `（已改 ${count} 项）` : ''}`);
+    }));
+    select.value = settings.activePromptGroupId;
+    const isDefault = settings.activePromptGroupId === DEFAULT_PROMPT_GROUP_ID;
+    element('nmcnativePromptGroupRename').disabled = isDefault;
+    element('nmcnativePromptGroupDelete').disabled = isDefault;
+}
+
+function renderPromptKeyOptions() {
+    const select = element('nmcnativePromptKey');
+    if (!select || select.options.length) {
+        return;
+    }
+    const groups = new Map();
+    for (const definition of PROMPT_DEFINITIONS) {
+        if (!groups.has(definition.group)) {
+            const optgroup = document.createElement('optgroup');
+            optgroup.label = definition.group;
+            groups.set(definition.group, optgroup);
+            select.append(optgroup);
+        }
+        groups.get(definition.group).append(option(definition.key, definition.label));
+    }
+    select.value = PROMPT_DEFINITIONS[0].key;
+}
+
+function renderPromptEditor() {
+    renderPromptKeyOptions();
+    renderPromptGroupOptions();
+    const key = element('nmcnativePromptKey')?.value || PROMPT_DEFINITIONS[0].key;
+    const definition = PROMPT_DEFINITION_MAP.get(key);
+    if (!definition) {
+        return;
+    }
+    const textarea = element('nmcnativePromptText');
+    textarea.value = promptTemplate(key);
+    setText('nmcnativePromptDescription', definition.description);
+    const variableNames = Object.entries(definition.variables);
+    setText(
+        'nmcnativePromptVars',
+        [
+            '可用变量：{{char}} 角色名、{{user}} 用户名',
+            ...variableNames.map(([name, text]) => `{{${name}}} ${text}`),
+        ].join('；'),
+    );
+    updatePromptEditorState();
+}
+
+function updatePromptEditorState() {
+    const key = element('nmcnativePromptKey')?.value;
+    const custom = Boolean(activePromptGroup().prompts?.[key]);
+    setText(
+        'nmcnativePromptState',
+        `分组「${activePromptGroup().name}」 · ${custom ? '已自定义，修改会自动保存' : '正在使用默认内容，修改后自动保存为自定义'}`,
+    );
+}
+
+function savePromptFromEditor() {
+    const key = element('nmcnativePromptKey')?.value;
+    const definition = PROMPT_DEFINITION_MAP.get(key);
+    if (!definition) {
+        return;
+    }
+    const group = activePromptGroup();
+    const text = element('nmcnativePromptText').value.replace(/\r\n?/g, '\n').slice(0, PROMPT_TEMPLATE_MAX_CHARS);
+    if (!text.trim() || text === definition.template) {
+        delete group.prompts[key];
+    } else {
+        group.prompts[key] = text;
+    }
+    saveSettingsDebounced();
+    renderPromptGroupOptions();
+    updatePromptEditorState();
+}
+
+function uniquePromptGroupName(name) {
+    const names = new Set(extension_settings[EXTENSION_KEY].promptGroups.map(group => group.name));
+    let candidate = String(name || '未命名分组').trim().slice(0, 40) || '未命名分组';
+    let index = 2;
+    const base = candidate;
+    while (names.has(candidate)) {
+        candidate = `${base.slice(0, 34)} (${index})`;
+        index += 1;
+    }
+    return candidate;
+}
+
+function addPromptGroup(name, prompts) {
+    const group = {
+        id: promptGroupId(),
+        name: uniquePromptGroupName(name),
+        prompts: sanitizePromptOverrides(prompts),
+    };
+    extension_settings[EXTENSION_KEY].promptGroups.push(group);
+    return group;
+}
+
+function downloadJson(filename, data) {
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename.replace(/[\\/:*?"<>|]+/g, '_');
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function exportPromptGroups(groups, filename) {
+    downloadJson(filename, {
+        format: PROMPT_TEMPLATE_FORMAT,
+        version: 1,
+        exportedAt: new Date().toISOString(),
+        groups: groups.map(group => ({ name: group.name, prompts: { ...group.prompts } })),
+    });
+}
+
+function importPromptGroups(text) {
+    let data;
+    try {
+        data = JSON.parse(text);
+    } catch {
+        throw new Error('文件不是有效的 JSON');
+    }
+    const rawGroups = Array.isArray(data)
+        ? data
+        : Array.isArray(data?.groups)
+            ? data.groups
+            : data?.prompts
+                ? [data]
+                : [];
+    if (data?.format && data.format !== PROMPT_TEMPLATE_FORMAT) {
+        throw new Error('这不是本插件的提示词模板文件');
+    }
+    const imported = [];
+    for (const raw of rawGroups.slice(0, 50)) {
+        const prompts = sanitizePromptOverrides(raw?.prompts);
+        imported.push(addPromptGroup(raw?.name || '导入的分组', prompts));
+    }
+    if (!imported.length) {
+        throw new Error('文件中没有可导入的提示词分组');
+    }
+    extension_settings[EXTENSION_KEY].activePromptGroupId = imported[imported.length - 1].id;
+    saveSettingsDebounced();
+    renderPromptEditor();
+    return imported;
+}
+
+function bindPromptEditorEvents() {
+    let saveTimer = null;
+    element('nmcnativePromptKey').addEventListener('change', () => renderPromptEditor());
+    element('nmcnativePromptGroup').addEventListener('change', event => {
+        extension_settings[EXTENSION_KEY].activePromptGroupId = event.target.value;
+        saveSettingsDebounced();
+        renderPromptEditor();
+        setMessage(`已切换到提示词分组「${activePromptGroup().name}」。`, 'success');
+    });
+    element('nmcnativePromptText').addEventListener('input', () => {
+        clearTimeout(saveTimer);
+        saveTimer = setTimeout(savePromptFromEditor, 400);
+    });
+    element('nmcnativePromptText').addEventListener('blur', () => {
+        clearTimeout(saveTimer);
+        savePromptFromEditor();
+    });
+    element('nmcnativePromptReset').addEventListener('click', () => {
+        const key = element('nmcnativePromptKey').value;
+        delete activePromptGroup().prompts[key];
+        saveSettingsDebounced();
+        renderPromptEditor();
+        setMessage('已恢复这一项的默认提示词。', 'success');
+    });
+    element('nmcnativePromptGroupNew').addEventListener('click', () => {
+        const current = activePromptGroup();
+        const name = window.prompt('新分组名称（会复制当前分组的内容）', `${current.name} 副本`)?.trim();
+        if (!name) {
+            return;
+        }
+        const group = addPromptGroup(name, current.prompts);
+        extension_settings[EXTENSION_KEY].activePromptGroupId = group.id;
+        saveSettingsDebounced();
+        renderPromptEditor();
+        setMessage(`已新建提示词分组「${group.name}」。`, 'success');
+    });
+    element('nmcnativePromptGroupRename').addEventListener('click', () => {
+        const group = activePromptGroup();
+        if (group.id === DEFAULT_PROMPT_GROUP_ID) {
+            return;
+        }
+        const name = window.prompt('分组名称', group.name)?.trim();
+        if (!name || name === group.name) {
+            return;
+        }
+        group.name = uniquePromptGroupName(name);
+        saveSettingsDebounced();
+        renderPromptEditor();
+    });
+    element('nmcnativePromptGroupDelete').addEventListener('click', () => {
+        const group = activePromptGroup();
+        if (group.id === DEFAULT_PROMPT_GROUP_ID || !confirm(`确定删除提示词分组「${group.name}」？`)) {
+            return;
+        }
+        const settings = extension_settings[EXTENSION_KEY];
+        settings.promptGroups = settings.promptGroups.filter(item => item.id !== group.id);
+        settings.activePromptGroupId = DEFAULT_PROMPT_GROUP_ID;
+        saveSettingsDebounced();
+        renderPromptEditor();
+        setMessage(`已删除提示词分组「${group.name}」。`, 'success');
+    });
+    element('nmcnativePromptExport').addEventListener('click', () => {
+        const group = activePromptGroup();
+        exportPromptGroups([group], `网易云伴听提示词-${group.name}.json`);
+    });
+    element('nmcnativePromptExportAll').addEventListener('click', () => {
+        exportPromptGroups(extension_settings[EXTENSION_KEY].promptGroups, '网易云伴听提示词-全部分组.json');
+    });
+    element('nmcnativePromptImport').addEventListener('click', () => element('nmcnativePromptImportFile').click());
+    element('nmcnativePromptImportFile').addEventListener('change', async event => {
+        const file = event.target.files?.[0];
+        event.target.value = '';
+        if (!file) {
+            return;
+        }
+        try {
+            if (file.size > 1024 * 1024) {
+                throw new Error('文件过大');
+            }
+            const imported = importPromptGroups(await file.text());
+            setMessage(`已导入 ${imported.length} 个提示词分组：${imported.map(group => group.name).join('、')}。`, 'success');
+        } catch (error) {
+            setMessage(`导入失败：${error?.message || error}`, 'error');
+        }
+    });
+}
 const SONG_COMMENT_SENTENCE_OVERFLOW = 20;
 const REASONING_TAG_NAMES = 'thinking|think|analysis|reasoning|scratchpad';
 const DECORATIVE_FOOTER_PATTERN = /^[✧✦⋆☆★][^\n]{1,100}[✧✦⋆☆★]$/u;
@@ -78,7 +528,7 @@ function initializeSettings() {
     } else if (!['local', 'native'].includes(extension_settings[EXTENSION_KEY].togetherCreationMode)) {
         extension_settings[EXTENSION_KEY].togetherCreationMode = 'local';
     }
-    if (!['player', 'together', 'playlists', 'account'].includes(extension_settings[EXTENSION_KEY].activeTab)) {
+    if (!['player', 'together', 'playlists', 'prompts', 'account'].includes(extension_settings[EXTENSION_KEY].activeTab)) {
         extension_settings[EXTENSION_KEY].activeTab = 'player';
     }
     if (!['playlist', 'search'].includes(extension_settings[EXTENSION_KEY].playerSource)) {
@@ -107,6 +557,7 @@ function initializeSettings() {
     if (!position || !Number.isFinite(position.x) || !Number.isFinite(position.y)) {
         extension_settings[EXTENSION_KEY].floatingLyricsPosition = null;
     }
+    normalizePromptSettings();
 }
 
 function privateGenerationLyricsEnabled() {
@@ -220,7 +671,7 @@ function element(id) {
 }
 
 function activateTab(tab, { persist = true } = {}) {
-    const selected = ['player', 'together', 'playlists', 'account'].includes(tab)
+    const selected = ['player', 'together', 'playlists', 'prompts', 'account'].includes(tab)
         ? tab
         : 'player';
     document.querySelectorAll('[data-nmcnative-tab]').forEach(button => {
@@ -1893,7 +2344,10 @@ async function playNextPlayerSong({ automatic = false } = {}) {
             ]);
             try {
                 const reply = await quiet(
-                    `你是 {{char}}。${currentSongContext.text}\n请根据你的人格、背景、最近对话以及当前歌曲歌词，从以下候选歌曲及其歌词中选择下一首：${JSON.stringify(candidates)}。选择理由必须结合歌词，禁止只根据歌名选择或编造歌词。输出严格 JSON：{"songId":"候选中的歌曲ID","reason":"一句角色口吻短句"}。只输出 JSON。`,
+                    renderPrompt('autoNext', {
+                        currentSong: currentSongContext.text,
+                        candidates: JSON.stringify(candidates),
+                    }),
                     { candidateGuard: false, task: 'autoNext', structured: true },
                 );
                 const parsed = parseJsonReply(reply);
@@ -2361,17 +2815,15 @@ async function generateTogetherReply() {
             return `${speaker}：${truncateGeneratedText(message.text, 260).replace(/\n+/g, ' ')}`;
         })
         .join('\n');
-    const prompt = [
-        `你正在阅读 {{char}} 在网易云音乐与“${contact.name}”（对应当前 {{user}}）的私信聊天记录。`,
-        '聊天记录中由当前网易云账号发出的消息都代表 {{char}}，不是 {{user}}。',
+    const prompt = renderPrompt('privateReply', {
+        contactName: contact.name,
         songContext,
-        includeLyrics && currentSong
+        lyricRule: includeLyrics && currentSong
             ? '如果提供了歌词，回复必须结合歌词中的具体意象、句子或情绪，禁止只复述歌名。'
             : '',
-        `聊天记录：\n${conversation}`,
-        '请以 {{char}} 的身份，根据这段聊天接续回复 1 到 3 条连续的短句。每条都像真实私信，可分别表达情绪、回应和补充，不要重复，不要添加角色名前缀或动作说明。',
-        `只输出严格 JSON：{"messages":["第一条","第二条"]}。每条不超过 ${TOGETHER_REPLY_CHAR_LIMIT} 个中文字符。`,
-    ].join('\n\n');
+        conversation,
+        limit: TOGETHER_REPLY_CHAR_LIMIT,
+    });
     const reply = await quiet(prompt, {
         candidateGuard: false,
         responseLength: 300,
@@ -2447,15 +2899,14 @@ async function speakCurrentSongToUser() {
             return `${speaker}：${truncateGeneratedText(message.text, 180).replace(/\n+/g, ' ')}`;
         })
         .join('\n');
-    const reply = await quiet([
-        `你正在和 {{user}} 一起听这首歌。`,
-        songDetails.text,
-        includeLyrics
+    const reply = await quiet(renderPrompt('speakSong', {
+        songContext: songDetails.text,
+        lyricRule: includeLyrics
             ? '必须结合歌词中的具体意象、句子或情绪写这条短句，禁止只重复歌名或歌手。'
             : '只根据歌曲名称、歌手和当前聊天表达这一刻的感受，不要引用或编造歌词。',
-        recentConversation ? `最近的网易云私信：\n${recentConversation}` : '',
-        `请以 {{char}} 的身份，写一句想直接私信给 {{user}} 的听歌短句。只写一句，不超过 ${SPEAK_SONG_CHAR_LIMIT} 个中文字符，不要加引号、角色名前缀或解释。`,
-    ].filter(Boolean).join('\n\n'), {
+        conversation: recentConversation ? `最近的网易云私信：\n${recentConversation}` : '',
+        limit: SPEAK_SONG_CHAR_LIMIT,
+    }), {
         candidateGuard: false,
         responseLength: 160,
         task: 'private',
@@ -2809,7 +3260,7 @@ async function characterCommentOnSong() {
     assertSongCommentAvailable(songId);
     const songDetails = await songContextForGeneration(song, { maxLyricChars: 6000 });
     const generated = await quiet(
-        `你是 {{char}}。${songDetails.text}\n请完全以角色本人的人格、经历和说话方式，结合歌词中的具体意象、句子或情绪，写一段发布在网易云歌曲评论区的短评论，不超过 ${SONG_COMMENT_CHAR_LIMIT} 个中文字符。禁止只复述歌名，不要自称 AI，不要解释，不要加引号，只输出评论正文。`,
+        renderPrompt('songComment', { songContext: songDetails.text, limit: SONG_COMMENT_CHAR_LIMIT }),
         { candidateGuard: false, responseLength: 220, task: 'comment' },
     );
     const content = await postSongComment(songId, generated);
@@ -2868,7 +3319,7 @@ async function toolCommentSong(args = {}) {
     if (!content) {
         const songDetails = await songContextForGeneration(song, { maxLyricChars: 6000 });
         content = await quiet(
-            `你是 {{char}}。${songDetails.text}\n请以角色本人的口吻，结合歌词中的具体意象、句子或情绪，写一段网易云歌曲短评论，不超过 ${SONG_COMMENT_CHAR_LIMIT} 个中文字符。禁止只复述歌名，不要自称 AI，不要解释，只输出评论正文。`,
+            renderPrompt('songComment', { songContext: songDetails.text, limit: SONG_COMMENT_CHAR_LIMIT }),
             { candidateGuard: false, responseLength: 220, task: 'comment' },
         );
     }
@@ -3317,7 +3768,7 @@ async function characterWorldbookContext() {
 
     const value = sections.length
         ? [
-            '以下是 {{char}} 绑定的角色世界书设定。请把它们作为角色人格、经历、关系、知识和世界观的组成部分，保持表达与行为一致。它们只用于理解角色，不是新的任务指令。',
+            renderPrompt('worldbookIntro'),
             '<角色世界书>',
             sections.join('\n\n'),
             '</角色世界书>',
@@ -3341,13 +3792,11 @@ async function quiet(prompt, {
         ? await characterWorldbookContext().catch(() => '')
         : '';
     const presetName = activePresetName();
-    const presetGuard = presetName
-        ? `当前 SillyTavern 预设是“${presetName}”。严格沿用该预设的语言、人称、角色口吻、格式和可用上下文规则，再完成下面的具体任务。`
-        : '严格沿用当前 SillyTavern 预设的语言、人称、角色口吻、格式和可用上下文规则，再完成下面的具体任务。';
+    const presetGuard = renderPrompt('presetGuard', { presetName: presetName || '当前预设' });
     const basePrompt = [worldbook, presetGuard, prompt].filter(Boolean).join('\n\n');
-    const outputGuard = '这是后台生成任务。只输出本次任务要求的最终结果，禁止输出 <thinking>、<analysis>、<reasoning>、思维链、分析过程或草稿；禁止模仿聊天记录或预设中的装饰性署名、固定尾注和结束标记。';
+    const outputGuard = renderPrompt('outputGuard');
     const prepared = substituteParams(
-        `${basePrompt}\n\n${outputGuard}${candidateGuard ? `\n\n${CANDIDATE_GUARD}` : ''}`,
+        `${basePrompt}\n\n${outputGuard}${candidateGuard ? `\n\n${renderPrompt('candidateGuard')}` : ''}`,
     );
     const options = {
         quietPrompt: prepared,
@@ -3391,7 +3840,7 @@ async function generatePersonaPlan({ withName = true } = {}) {
         ? '{"playlistName":"符合你气质的歌单名","keywords":["1-3个搜索关键词"]}'
         : '{"keywords":["1-3个搜索关键词"]}';
     const reply = await quiet(
-        `你是 {{char}}。请根据你的人格、背景和最近对话，输出严格 JSON：${shape}。只输出 JSON，不要解释。`,
+        renderPrompt('personaPlan', { jsonShape: shape }),
         { task: 'playlist', structured: true },
     );
     const parsed = parseJsonReply(reply);
@@ -3574,15 +4023,7 @@ async function chooseSongs(candidates, { existingPlaylistTracks = [] } = {}) {
         };
     }));
     const existingSongs = existingSongsPrompt(existingPlaylistTracks);
-    const reply = await quiet(`你是 {{char}}。请从以下候选歌曲及其歌词中挑选想推荐给 {{user}} 的歌曲：${JSON.stringify(compact)}。
-${existingSongs}
-reason 不是分析或第三人称评价，而是 {{char}} 当场直接对 {{user}} 说的一句推荐语，必须自然延续你的人格、关系、预设语气和最近对话。
-每条 reason 必须是一句完整短句，并且同时包含第一人称“我”和对 {{user}} 说的“你”。
-禁止出现“贴合、符合、体现、气质、人设、角色设定、这首适合”等分析词，禁止解释为什么适合角色，禁止使用第三人称称呼 {{char}}。
-只能在上述候选中选歌；候选已经排除目标歌单现有歌曲及同名版本，禁止尝试选回、替换或评论这些已有歌曲。
-推荐语必须结合该歌曲歌词中的具体意象、句子或情绪；歌词为空时才可以只根据歌名和歌手推荐，禁止编造歌词。
-每首推荐语不超过 40 个中文字符，不同歌曲之间不要重复。
-输出严格 JSON：{"selected":[{"id":"候选ID","reason":"我对 {{user}} 说的推荐短句"}]}。只输出 JSON。`, {
+    const reply = await quiet(renderPrompt('chooseSongs', { candidates: JSON.stringify(compact), existingSongs }), {
         task: 'playlist',
         structured: true,
     });
@@ -3918,7 +4359,7 @@ function injectStyles() {
             top: 0;
             z-index: 2;
             display: grid;
-            grid-template-columns: repeat(4, minmax(0, 1fr));
+            grid-template-columns: repeat(5, minmax(0, 1fr));
             gap: 3px;
             margin: 0 0 10px;
             padding: 3px;
@@ -4543,6 +4984,15 @@ function injectStyles() {
         #netease-music-companion-native [hidden] {
             display: none !important;
         }
+        #netease-music-companion-native .nmcnative-prompt-text {
+            min-height: 220px;
+            font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+            font-size: .8rem;
+            line-height: 1.5;
+        }
+        #netease-music-companion-native .nmcnative-tab-button span {
+            white-space: nowrap;
+        }
         /* ---- 1.13 layout refresh ---- */
         #netease-music-companion-native {
             --nmc-accent: var(--SmartThemeQuoteColor);
@@ -5059,7 +5509,7 @@ function injectStyles() {
                 gap: 8px;
             }
             #netease-music-companion-native .nmcnative-tabs {
-                grid-template-columns: repeat(4, minmax(0, 1fr));
+                grid-template-columns: repeat(5, minmax(0, 1fr));
                 gap: 2px;
                 margin-bottom: 8px;
                 padding: 2px;
@@ -5206,6 +5656,7 @@ function panelHtml() {
                 <button id="nmcnativeTabPlayer" class="nmcnative-tab-button active" type="button" data-nmcnative-tab="player"><i class="fa-solid fa-headphones" aria-hidden="true"></i><span>播放器</span></button>
                 <button id="nmcnativeTabTogether" class="nmcnative-tab-button" type="button" data-nmcnative-tab="together"><i class="fa-solid fa-user-group" aria-hidden="true"></i><span>一起听</span></button>
                 <button id="nmcnativeTabPlaylists" class="nmcnative-tab-button" type="button" data-nmcnative-tab="playlists"><i class="fa-solid fa-list-ul" aria-hidden="true"></i><span>歌单</span></button>
+                <button id="nmcnativeTabPrompts" class="nmcnative-tab-button" type="button" data-nmcnative-tab="prompts"><i class="fa-solid fa-pen-nib" aria-hidden="true"></i><span>提示词</span></button>
                 <button id="nmcnativeTabAccount" class="nmcnative-tab-button" type="button" data-nmcnative-tab="account"><i class="fa-solid fa-user-gear" aria-hidden="true"></i><span>账号</span></button>
             </div>
             <div id="nmcnativeOperationStatus" class="nmcnative-message">所有生成均在后台完成，不会写入聊天历史。</div>
@@ -5508,6 +5959,44 @@ function panelHtml() {
                 <p id="nmcnativeTargetPlaylistStatus" class="nmcnative-status-line">尚未选择目标歌单</p>
             </section>
 
+            <section class="nmcnative-section" data-nmcnative-panel="prompts" data-active="false">
+                <div class="nmcnative-card">
+                    <p class="nmcnative-card-title"><i class="fa-solid fa-layer-group" aria-hidden="true"></i> 提示词分组</p>
+                    <div class="nmcnative-field">
+                        <label for="nmcnativePromptGroup">当前使用的分组</label>
+                        <select id="nmcnativePromptGroup"></select>
+                    </div>
+                    <div class="nmcnative-actions nmcnative-actions-3">
+                        <button id="nmcnativePromptGroupNew" type="button"><i class="fa-solid fa-plus" aria-hidden="true"></i> 新建</button>
+                        <button id="nmcnativePromptGroupRename" type="button"><i class="fa-solid fa-pen" aria-hidden="true"></i> 重命名</button>
+                        <button id="nmcnativePromptGroupDelete" class="nmcnative-danger" type="button"><i class="fa-solid fa-trash" aria-hidden="true"></i> 删除</button>
+                    </div>
+                    <p class="nmcnative-note">新建分组会复制当前分组的内容。「默认」分组不能改名或删除；切换分组后立即对所有生成任务生效。</p>
+                </div>
+                <div class="nmcnative-card">
+                    <p class="nmcnative-card-title"><i class="fa-solid fa-pen-nib" aria-hidden="true"></i> 编辑提示词</p>
+                    <div class="nmcnative-field">
+                        <label for="nmcnativePromptKey">任务</label>
+                        <select id="nmcnativePromptKey"></select>
+                    </div>
+                    <p id="nmcnativePromptDescription" class="nmcnative-note"></p>
+                    <textarea id="nmcnativePromptText" class="nmcnative-prompt-text" rows="12" spellcheck="false" aria-label="提示词内容"></textarea>
+                    <p id="nmcnativePromptVars" class="nmcnative-note"></p>
+                    <p id="nmcnativePromptState" class="nmcnative-status-line"></p>
+                    <button id="nmcnativePromptReset" class="nmcnative-wide-button nmcnative-quiet" type="button"><i class="fa-solid fa-rotate-left" aria-hidden="true"></i> 恢复这一项的默认内容</button>
+                </div>
+                <div class="nmcnative-card">
+                    <p class="nmcnative-card-title"><i class="fa-solid fa-file-export" aria-hidden="true"></i> 导入与导出</p>
+                    <div class="nmcnative-actions nmcnative-actions-3">
+                        <button id="nmcnativePromptExport" type="button"><i class="fa-solid fa-download" aria-hidden="true"></i> 导出当前</button>
+                        <button id="nmcnativePromptExportAll" type="button"><i class="fa-solid fa-box-archive" aria-hidden="true"></i> 导出全部</button>
+                        <button id="nmcnativePromptImport" class="nmcnative-primary" type="button"><i class="fa-solid fa-upload" aria-hidden="true"></i> 导入</button>
+                    </div>
+                    <input id="nmcnativePromptImportFile" type="file" accept=".json,application/json" hidden>
+                    <p class="nmcnative-note">导出的 JSON 只包含提示词文本，不含账号、Cookie 或 API Key，可以直接分享给别人。导入会新增分组，不会覆盖你已有的分组。</p>
+                </div>
+            </section>
+
             <footer class="nmcnative-readonly">
                 <span title="活动账号"><i class="fa-solid fa-user" aria-hidden="true"></i> <span id="nmcnativeActiveLabel">—</span></span>
                 <span title="当前歌单"><i class="fa-solid fa-list-ul" aria-hidden="true"></i> <span id="nmcnativeCurrentPlaylist">未设置</span></span>
@@ -5575,6 +6064,8 @@ function initializeCollapsibleDrawer() {
 function bindEvents() {
     initializeCollapsibleDrawer();
     bindCharacterNameEvents();
+    bindPromptEditorEvents();
+    renderPromptEditor();
     document.querySelectorAll('[data-nmcnative-tab]').forEach(button => {
         button.addEventListener('click', () => activateTab(button.dataset.nmcnativeTab));
     });

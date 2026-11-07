@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.14.0
+
+- Added a Prompts tab. Every background generation prompt (playlist planning,
+  song picking, auto next, song comments, private replies, listening notes)
+  and the shared system guards can now be edited.
+- Prompts are saved in named groups; switch, copy, rename or delete groups,
+  and reset any single prompt to its default.
+- Export the current group or all groups as JSON and import templates shared
+  by others. Imports are added as new groups and never overwrite existing ones;
+  exported files contain only prompt text.
+
 ## 1.13.1
 
 - Floating lyrics are now transparent by default: only the lyric text is shown
