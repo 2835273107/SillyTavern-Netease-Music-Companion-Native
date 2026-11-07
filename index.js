@@ -51,6 +51,7 @@ const state = {
     playerAutoAdvancing: false,
     lyricLines: [],
     lyricTimes: [],
+    lyricHasTranslation: false,
     lyricCache: new Map(),
     lyricIndex: -1,
     playerLoadToken: 0,
@@ -95,6 +96,16 @@ function initializeSettings() {
     }
     if (typeof extension_settings[EXTENSION_KEY].includeTogetherLyrics !== 'boolean') {
         extension_settings[EXTENSION_KEY].includeTogetherLyrics = true;
+    }
+    if (typeof extension_settings[EXTENSION_KEY].floatingLyrics !== 'boolean') {
+        extension_settings[EXTENSION_KEY].floatingLyrics = false;
+    }
+    if (typeof extension_settings[EXTENSION_KEY].lyricTranslation !== 'boolean') {
+        extension_settings[EXTENSION_KEY].lyricTranslation = true;
+    }
+    const position = extension_settings[EXTENSION_KEY].floatingLyricsPosition;
+    if (!position || !Number.isFinite(position.x) || !Number.isFinite(position.y)) {
+        extension_settings[EXTENSION_KEY].floatingLyricsPosition = null;
     }
 }
 
@@ -1060,6 +1071,208 @@ function renderTogetherSong(song) {
     setText('nmcnativeTogetherSong', parts.join(' · '));
 }
 
+function lyricTranslationEnabled() {
+    return extension_settings[EXTENSION_KEY]?.lyricTranslation !== false;
+}
+
+function floatingLyricsEnabled() {
+    return extension_settings[EXTENSION_KEY]?.floatingLyrics === true;
+}
+
+function ensureFloatingLyrics() {
+    let node = element('nmcnativeFloatingLyricsPanel');
+    if (node) {
+        return node;
+    }
+    node = document.createElement('div');
+    node.id = 'nmcnativeFloatingLyricsPanel';
+    node.className = 'nmcnative-floating-lyrics';
+    node.hidden = true;
+    node.setAttribute('role', 'status');
+    node.setAttribute('aria-live', 'off');
+    node.innerHTML = `
+        <div class="nmcnative-float-bar">
+            <span class="nmcnative-float-grip" title="拖动移动位置" aria-hidden="true"><i class="fa-solid fa-grip-lines"></i></span>
+            <span class="nmcnative-float-song"></span>
+            <button type="button" class="nmcnative-float-btn" data-float-action="toggle" title="播放/暂停" aria-label="播放/暂停"><i class="fa-solid fa-play"></i></button>
+            <button type="button" class="nmcnative-float-btn" data-float-action="next" title="下一首" aria-label="下一首"><i class="fa-solid fa-forward-step"></i></button>
+            <button type="button" class="nmcnative-float-btn" data-float-action="translation" title="切换中文翻译" aria-label="切换中文翻译">译</button>
+            <button type="button" class="nmcnative-float-btn" data-float-action="close" title="关闭悬浮歌词" aria-label="关闭悬浮歌词"><i class="fa-solid fa-xmark"></i></button>
+        </div>
+        <p class="nmcnative-float-line"></p>
+        <p class="nmcnative-float-translation"></p>
+    `;
+    document.body.append(node);
+    bindFloatingLyrics(node);
+    applyFloatingLyricsPosition(node);
+    return node;
+}
+
+function applyFloatingLyricsPosition(node) {
+    const position = extension_settings[EXTENSION_KEY]?.floatingLyricsPosition;
+    if (!position) {
+        node.style.left = '';
+        node.style.top = '';
+        node.classList.remove('nmcnative-float-placed');
+        return;
+    }
+    const maxX = Math.max(0, window.innerWidth - Math.min(node.offsetWidth || 320, window.innerWidth));
+    const maxY = Math.max(0, window.innerHeight - (node.offsetHeight || 90));
+    node.style.left = `${Math.min(Math.max(0, position.x), maxX)}px`;
+    node.style.top = `${Math.min(Math.max(0, position.y), maxY)}px`;
+    node.classList.add('nmcnative-float-placed');
+}
+
+function bindFloatingLyrics(node) {
+    const bar = node.querySelector('.nmcnative-float-bar');
+    let drag = null;
+    bar.addEventListener('pointerdown', event => {
+        if (event.button !== 0 || event.target.closest('button')) {
+            return;
+        }
+        const rect = node.getBoundingClientRect();
+        drag = { id: event.pointerId, dx: event.clientX - rect.left, dy: event.clientY - rect.top };
+        bar.setPointerCapture(event.pointerId);
+        node.classList.add('nmcnative-float-dragging');
+        event.preventDefault();
+    });
+    bar.addEventListener('pointermove', event => {
+        if (!drag || drag.id !== event.pointerId) {
+            return;
+        }
+        extension_settings[EXTENSION_KEY].floatingLyricsPosition = {
+            x: Math.round(event.clientX - drag.dx),
+            y: Math.round(event.clientY - drag.dy),
+        };
+        applyFloatingLyricsPosition(node);
+    });
+    const endDrag = event => {
+        if (!drag || drag.id !== event.pointerId) {
+            return;
+        }
+        drag = null;
+        node.classList.remove('nmcnative-float-dragging');
+        saveSettingsDebounced();
+    };
+    bar.addEventListener('pointerup', endDrag);
+    bar.addEventListener('pointercancel', endDrag);
+    bar.addEventListener('dblclick', event => {
+        if (event.target.closest('button')) {
+            return;
+        }
+        extension_settings[EXTENSION_KEY].floatingLyricsPosition = null;
+        applyFloatingLyricsPosition(node);
+        saveSettingsDebounced();
+    });
+    node.addEventListener('click', event => {
+        const action = event.target.closest('[data-float-action]')?.dataset.floatAction;
+        const audio = element('nmcnativePlayerAudio');
+        if (action === 'toggle' && audio?.src) {
+            if (audio.paused) {
+                void audio.play().catch(error => setMessage(error?.message || '播放失败', 'error'));
+            } else {
+                audio.pause();
+            }
+        } else if (action === 'next') {
+            void withBusy('正在切换下一首...', () => playNextPlayerSong());
+        } else if (action === 'translation') {
+            setLyricTranslation(!lyricTranslationEnabled());
+        } else if (action === 'close') {
+            setFloatingLyrics(false);
+        }
+    });
+    window.addEventListener('resize', () => {
+        if (!node.hidden) {
+            applyFloatingLyricsPosition(node);
+        }
+    });
+}
+
+function renderFloatingLyrics() {
+    if (!floatingLyricsEnabled() || !state.playerSong) {
+        const existing = element('nmcnativeFloatingLyricsPanel');
+        if (existing) {
+            existing.hidden = true;
+        }
+        return;
+    }
+    const node = ensureFloatingLyrics();
+    node.hidden = false;
+    const audio = element('nmcnativePlayerAudio');
+    const line = state.lyricLines[state.lyricIndex];
+    const nextLine = state.lyricLines[state.lyricIndex + 1];
+    const showTranslation = lyricTranslationEnabled();
+    const song = state.playerSong;
+    node.querySelector('.nmcnative-float-song').textContent = song
+        ? `${song.name}${song.artist ? ` - ${song.artist}` : ''}`
+        : '网易云音乐';
+    let mainText = '';
+    let subText = '';
+    if (!state.lyricLines.length) {
+        mainText = song.name;
+        subText = '暂无歌词';
+    } else if (!line) {
+        mainText = song.name;
+        subText = song.artist || '';
+    } else {
+        mainText = line.text;
+        subText = showTranslation && line.translation
+            ? line.translation
+            : nextLine?.text || '';
+    }
+    node.querySelector('.nmcnative-float-line').textContent = mainText;
+    const sub = node.querySelector('.nmcnative-float-translation');
+    sub.textContent = subText;
+    sub.classList.toggle('nmcnative-float-next', Boolean(line && subText && !(showTranslation && line.translation)));
+    const translationButton = node.querySelector('[data-float-action="translation"]');
+    translationButton.hidden = !state.lyricHasTranslation;
+    translationButton.setAttribute('aria-pressed', String(showTranslation));
+    const icon = node.querySelector('[data-float-action="toggle"] i');
+    const playing = Boolean(audio?.src && !audio.paused);
+    icon.className = `fa-solid ${playing ? 'fa-pause' : 'fa-play'}`;
+    node.classList.toggle('nmcnative-float-paused', !playing);
+}
+
+function updateLyricOptionControls() {
+    const translation = lyricTranslationEnabled();
+    const floating = floatingLyricsEnabled();
+    const translationChip = element('nmcnativeLyricTranslationToggle');
+    if (translationChip) {
+        translationChip.setAttribute('aria-pressed', String(translation));
+        translationChip.classList.toggle('nmcnative-chip-muted', !state.lyricHasTranslation);
+        translationChip.title = state.lyricHasTranslation
+            ? (translation ? '隐藏中文翻译' : '显示中文翻译')
+            : '当前歌曲没有翻译（中文歌曲只显示原词）';
+    }
+    const floatingChip = element('nmcnativeFloatingLyricsToggle');
+    if (floatingChip) {
+        floatingChip.setAttribute('aria-pressed', String(floating));
+    }
+    const translationBox = element('nmcnativeLyricTranslation');
+    if (translationBox) {
+        translationBox.checked = translation;
+    }
+    const floatingBox = element('nmcnativeFloatingLyrics');
+    if (floatingBox) {
+        floatingBox.checked = floating;
+    }
+    element('nmcnativePlayerLyrics')?.classList.toggle('nmcnative-hide-translation', !translation);
+}
+
+function setLyricTranslation(enabled) {
+    extension_settings[EXTENSION_KEY].lyricTranslation = Boolean(enabled);
+    saveSettingsDebounced();
+    updateLyricOptionControls();
+    renderFloatingLyrics();
+}
+
+function setFloatingLyrics(enabled) {
+    extension_settings[EXTENSION_KEY].floatingLyrics = Boolean(enabled);
+    saveSettingsDebounced();
+    updateLyricOptionControls();
+    renderFloatingLyrics();
+}
+
 function parseLrc(lyricText, translatedText = '') {
     const translations = new Map();
     const parseLines = (text, callback) => {
@@ -1154,12 +1367,16 @@ function renderPlayerLyrics() {
     }
     state.lyricIndex = -1;
     state.lyricTimes = state.lyricLines.map(line => line.time);
+    state.lyricHasTranslation = state.lyricLines.some(line => line.translation);
+    container.classList.toggle('nmcnative-has-translation', state.lyricHasTranslation);
+    updateLyricOptionControls();
     container.replaceChildren();
     if (!state.lyricLines.length) {
         const empty = document.createElement('p');
         empty.className = 'nmcnative-lyrics-empty';
         empty.textContent = state.playerSong ? '暂无可用歌词' : '播放或选择歌曲后显示歌词';
         container.append(empty);
+        renderFloatingLyrics();
         return;
     }
     const fragment = document.createDocumentFragment();
@@ -1169,7 +1386,10 @@ function renderPlayerLyrics() {
         row.className = 'nmcnative-lyric-line';
         row.dataset.index = String(index);
         row.dataset.time = String(line.time);
-        row.textContent = line.text;
+        const original = document.createElement('span');
+        original.className = 'nmcnative-lyric-original';
+        original.textContent = line.text;
+        row.append(original);
         if (line.translation) {
             const translation = document.createElement('span');
             translation.className = 'nmcnative-lyric-translation';
@@ -1180,6 +1400,7 @@ function renderPlayerLyrics() {
     });
     container.append(fragment);
     syncPlayerLyrics();
+    renderFloatingLyrics();
 }
 
 function findLyricIndex(currentTime) {
@@ -1210,6 +1431,7 @@ function syncPlayerLyrics() {
     }
     const previousIndex = state.lyricIndex;
     state.lyricIndex = nextIndex;
+    renderFloatingLyrics();
     const container = element('nmcnativePlayerLyrics');
     if (!container) {
         return;
@@ -1250,9 +1472,14 @@ function renderPlayerProgress() {
         time.textContent = `${formatPlaybackTime(currentTime)} / ${formatPlaybackTime(duration)}`;
     }
     if (toggle) {
-        toggle.textContent = audio && !audio.paused ? '暂停' : '播放';
+        const playing = Boolean(audio?.src && !audio.paused);
+        const label = playing ? '暂停' : '播放';
+        toggle.innerHTML = `<i class="fa-solid ${playing ? 'fa-pause' : 'fa-play'}" aria-hidden="true"></i>`;
+        toggle.title = label;
+        toggle.setAttribute('aria-label', label);
         toggle.disabled = !audio?.src;
     }
+    element('nmcnativeNowPlaying')?.setAttribute('data-playing', String(Boolean(audio?.src && !audio.paused)));
 }
 
 async function loadPlayerSong(song, { autoplay = false, queue = null } = {}) {
@@ -1275,9 +1502,10 @@ async function loadPlayerSong(song, { autoplay = false, queue = null } = {}) {
         state.playerQueue = [state.playerSong];
         state.playerQueueIndex = 0;
     }
+    setText('nmcnativePlayerSong', state.playerSong.name);
     setText(
-        'nmcnativePlayerSong',
-        `《${state.playerSong.name}》${state.playerSong.artist ? ` · ${state.playerSong.artist}` : ''}${state.playerSong.album ? ` · ${state.playerSong.album}` : ''}`,
+        'nmcnativePlayerArtist',
+        [state.playerSong.artist, state.playerSong.album].filter(Boolean).join(' · ') || '未知歌手',
     );
     const audio = element('nmcnativePlayerAudio');
     if (!audio) {
@@ -2324,9 +2552,10 @@ function renderRoomPlaylist(data) {
     renderRoomPlaylistChoices();
     const toggle = element('nmcnativeTogetherToggle');
     if (toggle) {
-        toggle.textContent = String(data?.playStatus || '').toUpperCase() === 'PAUSE'
-            ? '继续播放'
-            : '暂停';
+        const paused = String(data?.playStatus || '').toUpperCase() === 'PAUSE';
+        toggle.dataset.paused = String(paused);
+        toggle.title = paused ? '继续播放' : '暂停';
+        toggle.setAttribute('aria-label', toggle.title);
     }
 }
 
@@ -4298,6 +4527,480 @@ function injectStyles() {
         #netease-music-companion-native [hidden] {
             display: none !important;
         }
+        /* ---- 1.13 layout refresh ---- */
+        #netease-music-companion-native {
+            --nmc-accent: var(--SmartThemeQuoteColor);
+            --nmc-line: color-mix(in srgb, var(--SmartThemeBorderColor) 40%, transparent);
+            --nmc-soft: color-mix(in srgb, var(--SmartThemeQuoteColor) 9%, transparent);
+        }
+        #netease-music-companion-native .nmcnative-tab-button {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 3px;
+            min-height: 44px;
+        }
+        #netease-music-companion-native .nmcnative-tab-button i {
+            font-size: .95rem;
+            opacity: .8;
+        }
+        #netease-music-companion-native .nmcnative-tab-button.active i {
+            opacity: 1;
+            color: var(--nmc-accent);
+        }
+        #netease-music-companion-native button i + span,
+        #netease-music-companion-native button i {
+            pointer-events: none;
+        }
+        #netease-music-companion-native #nmcnativeOperationStatus {
+            margin: 0 0 10px;
+        }
+        #netease-music-companion-native #nmcnativeOperationStatus:empty {
+            display: none;
+        }
+        #netease-music-companion-native .nmcnative-section:first-of-type,
+        #netease-music-companion-native .nmcnative-section {
+            margin-top: 0;
+            padding-top: 0;
+            border-top: 0;
+        }
+        #netease-music-companion-native .nmcnative-subsection-title {
+            display: flex;
+            align-items: center;
+            gap: 7px;
+            margin: 16px 0 8px;
+            padding-top: 0;
+            border-top: 0;
+            font-size: .78rem;
+            font-weight: 700;
+            letter-spacing: .06em;
+            opacity: .72;
+        }
+        #netease-music-companion-native .nmcnative-subsection-title::after {
+            content: "";
+            flex: 1;
+            height: 1px;
+            background: var(--nmc-line);
+        }
+        #netease-music-companion-native .nmcnative-minor-title {
+            margin: 12px 0 6px;
+            font-size: .8rem;
+            font-weight: 650;
+            opacity: .82;
+        }
+        #netease-music-companion-native .nmcnative-card {
+            margin-bottom: 10px;
+            padding: 11px;
+            border: 1px solid var(--nmc-line);
+            border-radius: 12px;
+            background: color-mix(in srgb, var(--SmartThemeBlurTintColor) 70%, transparent);
+        }
+        #netease-music-companion-native .nmcnative-card > :last-child {
+            margin-bottom: 0;
+        }
+        #netease-music-companion-native .nmcnative-card .nmcnative-actions + .nmcnative-wide-button {
+            margin-top: 8px;
+            width: 100%;
+        }
+        #netease-music-companion-native .nmcnative-card-title {
+            margin: 0 0 9px;
+            font-size: .86rem;
+            font-weight: 700;
+        }
+        #netease-music-companion-native .nmcnative-card-title i {
+            color: var(--nmc-accent);
+            margin-right: 3px;
+        }
+        #netease-music-companion-native .nmcnative-intro-card {
+            background: linear-gradient(135deg, var(--nmc-soft), color-mix(in srgb, var(--SmartThemeBlurTintColor) 70%, transparent));
+        }
+        #netease-music-companion-native .nmcnative-actions-3 {
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+        }
+        #netease-music-companion-native .nmcnative-actions .nmcnative-wide-button {
+            grid-column: 1 / -1;
+        }
+        #netease-music-companion-native .nmcnative-danger:hover:not(:disabled) {
+            border-color: rgba(214, 84, 84, .55);
+            background: rgba(214, 84, 84, .14);
+        }
+        #netease-music-companion-native .nmcnative-quiet {
+            opacity: .82;
+            background: transparent;
+        }
+        #netease-music-companion-native .nmcnative-now-playing,
+        #netease-music-companion-native .nmcnative-room-card {
+            margin: 0 0 10px;
+            padding: 13px;
+            border: 1px solid color-mix(in srgb, var(--nmc-accent) 24%, transparent);
+            border-radius: 14px;
+            background:
+                radial-gradient(circle at 0 0, color-mix(in srgb, var(--nmc-accent) 18%, transparent), transparent 62%),
+                color-mix(in srgb, var(--SmartThemeBlurTintColor) 80%, transparent);
+        }
+        #netease-music-companion-native .nmcnative-hero-head,
+        #netease-music-companion-native .nmcnative-room-head {
+            display: flex;
+            align-items: center;
+            gap: 11px;
+            min-width: 0;
+        }
+        #netease-music-companion-native .nmcnative-hero-copy {
+            min-width: 0;
+            flex: 1;
+        }
+        #netease-music-companion-native .nmcnative-disc,
+        #netease-music-companion-native .nmcnative-room-icon {
+            display: grid;
+            place-items: center;
+            flex: 0 0 auto;
+            width: 46px;
+            height: 46px;
+            border-radius: 50%;
+            color: var(--nmc-accent);
+            background:
+                radial-gradient(circle, var(--SmartThemeBlurTintColor) 0 22%, transparent 23%),
+                conic-gradient(from 0deg, color-mix(in srgb, var(--nmc-accent) 50%, #222), #1c1c1c, color-mix(in srgb, var(--nmc-accent) 50%, #222), #1c1c1c, color-mix(in srgb, var(--nmc-accent) 50%, #222));
+            box-shadow: 0 0 0 1px color-mix(in srgb, var(--nmc-accent) 35%, transparent);
+        }
+        #netease-music-companion-native .nmcnative-disc i {
+            font-size: .8rem;
+            color: var(--SmartThemeBodyColor);
+        }
+        #netease-music-companion-native .nmcnative-room-icon {
+            border-radius: 12px;
+            background: var(--nmc-soft);
+        }
+        #netease-music-companion-native [data-playing="true"] .nmcnative-disc {
+            animation: nmcnative-spin 7s linear infinite;
+        }
+        @keyframes nmcnative-spin {
+            to { transform: rotate(360deg); }
+        }
+        #netease-music-companion-native .nmcnative-song-title {
+            margin: 0;
+            overflow: hidden;
+            font-size: .98rem;
+            font-weight: 700;
+            line-height: 1.3;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        #netease-music-companion-native .nmcnative-song-artist {
+            margin: 2px 0 0;
+            overflow: hidden;
+            font-size: .78rem;
+            opacity: .7;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        #netease-music-companion-native .nmcnative-seek-row {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            align-items: center;
+            gap: 9px;
+            margin-top: 11px;
+        }
+        #netease-music-companion-native .nmcnative-seek-row input[type="range"] {
+            height: 22px;
+            margin: 0;
+            accent-color: var(--nmc-accent);
+        }
+        #netease-music-companion-native .nmcnative-transport {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 14px;
+            margin-top: 6px;
+        }
+        #netease-music-companion-native .nmcnative-icon-button,
+        #netease-music-companion-native .nmcnative-play-button {
+            display: grid;
+            place-items: center;
+            padding: 0;
+            border-radius: 50%;
+        }
+        #netease-music-companion-native .nmcnative-icon-button {
+            width: 38px;
+            min-height: 38px;
+            height: 38px;
+            background: transparent;
+        }
+        #netease-music-companion-native .nmcnative-play-button {
+            width: 48px;
+            min-height: 48px;
+            height: 48px;
+            border-color: transparent;
+            color: var(--SmartThemeBlurTintColor);
+            background: var(--nmc-accent);
+            font-size: 1.05rem;
+            box-shadow: 0 4px 14px color-mix(in srgb, var(--nmc-accent) 35%, transparent);
+        }
+        #netease-music-companion-native .nmcnative-play-button:hover:not(:disabled) {
+            border-color: transparent;
+            background: color-mix(in srgb, var(--nmc-accent) 86%, white);
+        }
+        #netease-music-companion-native #nmcnativeTogetherToggle .fa-play,
+        #netease-music-companion-native #nmcnativeTogetherToggle[data-paused="true"] .fa-pause {
+            display: none;
+        }
+        #netease-music-companion-native #nmcnativeTogetherToggle[data-paused="true"] .fa-play {
+            display: inline-block;
+        }
+        #netease-music-companion-native .nmcnative-chip-row {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            gap: 6px;
+            margin-top: 10px;
+        }
+        #netease-music-companion-native .nmcnative-chip {
+            min-height: 28px;
+            padding: 3px 10px;
+            border-radius: 999px;
+            font-size: .74rem;
+            background: transparent;
+        }
+        #netease-music-companion-native .nmcnative-chip.nmcnative-chip-muted {
+            opacity: .55;
+        }
+        #netease-music-companion-native .nmcnative-chip[aria-pressed="true"] {
+            border-color: color-mix(in srgb, var(--nmc-accent) 55%, transparent);
+            color: var(--nmc-accent);
+            background: var(--nmc-soft);
+            font-weight: 650;
+        }
+        #netease-music-companion-native .nmcnative-room-card .nmcnative-status-line {
+            margin: 8px 0 0;
+            font-size: .74rem;
+            text-align: center;
+        }
+        #netease-music-companion-native .nmcnative-lyrics {
+            max-height: 240px;
+            margin-top: 0;
+            padding: 10px 6px;
+            border: 0;
+            border-radius: 12px;
+            background: color-mix(in srgb, var(--SmartThemeBlurTintColor) 55%, transparent);
+            -webkit-mask-image: linear-gradient(transparent, #000 14%, #000 86%, transparent);
+            mask-image: linear-gradient(transparent, #000 14%, #000 86%, transparent);
+        }
+        #netease-music-companion-native .nmcnative-lyric-line {
+            text-align: center;
+            padding: 5px 8px;
+        }
+        #netease-music-companion-native .nmcnative-lyric-line .nmcnative-lyric-original {
+            display: block;
+        }
+        #netease-music-companion-native .nmcnative-lyric-line.active {
+            background: transparent;
+            color: var(--nmc-accent);
+            font-size: 1.04em;
+        }
+        #netease-music-companion-native .nmcnative-lyric-line .nmcnative-lyric-translation {
+            margin-top: 2px;
+            font-size: .82em;
+            font-weight: 400;
+            opacity: .8;
+        }
+        #netease-music-companion-native .nmcnative-hide-translation .nmcnative-lyric-translation {
+            display: none;
+        }
+        #netease-music-companion-native .nmcnative-lyrics-empty {
+            text-align: center;
+        }
+        #netease-music-companion-native .nmcnative-source-button i {
+            margin-right: 4px;
+        }
+        #netease-music-companion-native details.nmcnative-details > summary i {
+            margin-right: 4px;
+            opacity: .75;
+        }
+        #netease-music-companion-native .nmcnative-readonly {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 5px 12px;
+            margin: 14px 0 0;
+            padding-top: 9px;
+            border-top: 1px solid var(--nmc-line);
+            font-size: .72rem;
+            opacity: .74;
+        }
+        #netease-music-companion-native .nmcnative-readonly > span {
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        #netease-music-companion-native .nmcnative-connection {
+            margin-left: auto;
+        }
+        #netease-music-companion-native .nmcnative-connection[data-kind="loading"]::before {
+            content: "";
+            display: inline-block;
+            width: 7px;
+            height: 7px;
+            margin-right: 5px;
+            border-radius: 50%;
+            background: var(--nmc-accent);
+            animation: nmcnative-pulse 1s ease-in-out infinite;
+        }
+        @keyframes nmcnative-pulse {
+            50% { opacity: .25; }
+        }
+        .nmcnative-floating-lyrics {
+            position: fixed;
+            left: 50%;
+            bottom: 86px;
+            z-index: 30000;
+            width: min(560px, calc(100vw - 24px));
+            padding: 6px 14px 12px;
+            box-sizing: border-box;
+            transform: translateX(-50%);
+            border: 1px solid color-mix(in srgb, var(--SmartThemeQuoteColor, #e66) 30%, transparent);
+            border-radius: 16px;
+            color: var(--SmartThemeBodyColor, #fff);
+            background: color-mix(in srgb, var(--SmartThemeBlurTintColor, #111) 78%, transparent);
+            box-shadow: 0 10px 34px rgba(0, 0, 0, .32);
+            backdrop-filter: blur(14px);
+            -webkit-backdrop-filter: blur(14px);
+            text-align: center;
+            user-select: none;
+            transition: opacity .2s ease;
+        }
+        .nmcnative-floating-lyrics.nmcnative-float-placed {
+            bottom: auto;
+            transform: none;
+        }
+        .nmcnative-floating-lyrics[hidden] {
+            display: none !important;
+        }
+        .nmcnative-floating-lyrics.nmcnative-float-paused {
+            opacity: .72;
+        }
+        .nmcnative-floating-lyrics .nmcnative-float-bar {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            min-height: 26px;
+            cursor: grab;
+            touch-action: none;
+            opacity: .5;
+            transition: opacity .2s ease;
+        }
+        .nmcnative-floating-lyrics:hover .nmcnative-float-bar,
+        .nmcnative-floating-lyrics:focus-within .nmcnative-float-bar,
+        .nmcnative-floating-lyrics.nmcnative-float-dragging .nmcnative-float-bar {
+            opacity: 1;
+        }
+        .nmcnative-floating-lyrics.nmcnative-float-dragging .nmcnative-float-bar {
+            cursor: grabbing;
+        }
+        .nmcnative-floating-lyrics .nmcnative-float-grip {
+            font-size: .75rem;
+            opacity: .7;
+        }
+        .nmcnative-floating-lyrics .nmcnative-float-song {
+            flex: 1;
+            min-width: 0;
+            overflow: hidden;
+            font-size: .72rem;
+            text-align: left;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .nmcnative-floating-lyrics .nmcnative-float-btn {
+            display: grid;
+            place-items: center;
+            width: 26px;
+            height: 26px;
+            min-height: 0;
+            margin: 0;
+            padding: 0;
+            border: 0;
+            border-radius: 50%;
+            color: inherit;
+            background: transparent;
+            font-size: .74rem;
+            cursor: pointer;
+        }
+        .nmcnative-floating-lyrics .nmcnative-float-btn:hover {
+            background: color-mix(in srgb, var(--SmartThemeQuoteColor, #e66) 18%, transparent);
+        }
+        .nmcnative-floating-lyrics .nmcnative-float-btn[data-float-action="translation"][aria-pressed="true"] {
+            color: var(--SmartThemeQuoteColor, #e66);
+            font-weight: 700;
+        }
+        .nmcnative-floating-lyrics .nmcnative-float-btn[hidden] {
+            display: none;
+        }
+        .nmcnative-floating-lyrics .nmcnative-float-line {
+            margin: 2px 0 0;
+            color: var(--SmartThemeQuoteColor, #e66);
+            font-size: 1.12rem;
+            font-weight: 700;
+            line-height: 1.4;
+            text-shadow: 0 1px 6px rgba(0, 0, 0, .35);
+            overflow-wrap: anywhere;
+        }
+        .nmcnative-floating-lyrics .nmcnative-float-translation {
+            min-height: 1.3em;
+            margin: 3px 0 0;
+            font-size: .88rem;
+            line-height: 1.4;
+            opacity: .9;
+            overflow-wrap: anywhere;
+        }
+        .nmcnative-floating-lyrics .nmcnative-float-translation.nmcnative-float-next {
+            font-size: .8rem;
+            opacity: .5;
+        }
+        .nmcnative-floating-lyrics .nmcnative-float-translation:empty {
+            display: none;
+        }
+        @media (max-width: 700px) {
+            .nmcnative-floating-lyrics {
+                bottom: 70px;
+                padding: 4px 10px 9px;
+            }
+            .nmcnative-floating-lyrics .nmcnative-float-line {
+                font-size: 1rem;
+            }
+            .nmcnative-floating-lyrics .nmcnative-float-bar {
+                opacity: 1;
+            }
+            #netease-music-companion-native .nmcnative-tab-button {
+                min-height: 44px;
+                gap: 2px;
+            }
+            #netease-music-companion-native .nmcnative-actions-3 {
+                grid-template-columns: repeat(3, minmax(0, 1fr));
+            }
+            #netease-music-companion-native .nmcnative-play-button {
+                width: 52px;
+                height: 52px;
+                min-height: 52px;
+            }
+            #netease-music-companion-native .nmcnative-icon-button {
+                width: 44px;
+                height: 44px;
+                min-height: 44px;
+            }
+            #netease-music-companion-native .nmcnative-chip {
+                min-height: 34px;
+            }
+            #netease-music-companion-native .nmcnative-connection {
+                margin-left: 0;
+            }
+        }
+        @media (prefers-reduced-motion: reduce) {
+            #netease-music-companion-native [data-playing="true"] .nmcnative-disc,
+            #netease-music-companion-native .nmcnative-connection::before {
+                animation: none;
+            }
+        }
         @media (max-width: 700px) {
             #netease-music-companion-native {
                 max-width: 100%;
@@ -4465,29 +5168,42 @@ function panelHtml() {
 
                 <div class="inline-drawer-content">
             <div class="nmcnative-tabs" role="tablist" aria-label="Netease Music Companion">
-                <button id="nmcnativeTabPlayer" class="nmcnative-tab-button active" type="button" data-nmcnative-tab="player">播放器</button>
-                <button id="nmcnativeTabTogether" class="nmcnative-tab-button" type="button" data-nmcnative-tab="together">一起听</button>
-                <button id="nmcnativeTabPlaylists" class="nmcnative-tab-button" type="button" data-nmcnative-tab="playlists">歌单管理</button>
-                <button id="nmcnativeTabAccount" class="nmcnative-tab-button" type="button" data-nmcnative-tab="account">账号</button>
+                <button id="nmcnativeTabPlayer" class="nmcnative-tab-button active" type="button" data-nmcnative-tab="player"><i class="fa-solid fa-headphones" aria-hidden="true"></i><span>播放器</span></button>
+                <button id="nmcnativeTabTogether" class="nmcnative-tab-button" type="button" data-nmcnative-tab="together"><i class="fa-solid fa-user-group" aria-hidden="true"></i><span>一起听</span></button>
+                <button id="nmcnativeTabPlaylists" class="nmcnative-tab-button" type="button" data-nmcnative-tab="playlists"><i class="fa-solid fa-list-ul" aria-hidden="true"></i><span>歌单</span></button>
+                <button id="nmcnativeTabAccount" class="nmcnative-tab-button" type="button" data-nmcnative-tab="account"><i class="fa-solid fa-user-gear" aria-hidden="true"></i><span>账号</span></button>
             </div>
+            <div id="nmcnativeOperationStatus" class="nmcnative-message">所有生成均在后台完成，不会写入聊天历史。</div>
             <section class="nmcnative-section nmcnative-first-section" data-nmcnative-panel="account" data-active="false">
-                <div class="nmcnative-grid">
-                    <div class="nmcnative-field nmcnative-field-wide">
-                        <label for="nmcnativeBackendUrl">后端地址</label>
-                        <input id="nmcnativeBackendUrl" type="text" spellcheck="false">
-                    </div>
-                    <div class="nmcnative-field nmcnative-field-wide">
+                <div class="nmcnative-card">
+                    <p class="nmcnative-card-title"><i class="fa-solid fa-circle-user" aria-hidden="true"></i> 当前账号</p>
+                    <div class="nmcnative-field">
                         <label for="nmcnativeAccountSelect">选择账号</label>
                         <select id="nmcnativeAccountSelect"></select>
                     </div>
-                    <button id="nmcnativeAddAccount" type="button">+ 添加账号</button>
-                    <button id="nmcnativeDeleteAccount" type="button">删除账号</button>
-                    <button id="nmcnativeRenameAccount" type="button">重命名</button>
-                    <button id="nmcnativeCheckStatus" type="button">检查登录状态</button>
-                    <button id="nmcnativeQrLogin" type="button">扫码登录</button>
-                    <button id="nmcnativeLogout" type="button">退出登录</button>
+                    <p id="nmcnativeLoginState" class="nmcnative-status-line">正在读取账号状态...</p>
+                    <div class="nmcnative-actions">
+                        <button id="nmcnativeQrLogin" class="nmcnative-primary" type="button"><i class="fa-solid fa-qrcode" aria-hidden="true"></i> 扫码登录</button>
+                        <button id="nmcnativeCheckStatus" type="button"><i class="fa-solid fa-rotate" aria-hidden="true"></i> 检查状态</button>
+                    </div>
                 </div>
-                <p id="nmcnativeLoginState" class="nmcnative-status-line">正在读取账号状态...</p>
+                <div class="nmcnative-card">
+                    <p class="nmcnative-card-title"><i class="fa-solid fa-users-gear" aria-hidden="true"></i> 管理账号</p>
+                    <div class="nmcnative-actions nmcnative-actions-3">
+                        <button id="nmcnativeAddAccount" type="button"><i class="fa-solid fa-plus" aria-hidden="true"></i> 添加</button>
+                        <button id="nmcnativeRenameAccount" type="button"><i class="fa-solid fa-pen" aria-hidden="true"></i> 重命名</button>
+                        <button id="nmcnativeDeleteAccount" class="nmcnative-danger" type="button"><i class="fa-solid fa-trash" aria-hidden="true"></i> 删除</button>
+                    </div>
+                    <button id="nmcnativeLogout" class="nmcnative-wide-button nmcnative-quiet" type="button"><i class="fa-solid fa-right-from-bracket" aria-hidden="true"></i> 退出当前账号登录</button>
+                </div>
+                <details class="nmcnative-details">
+                    <summary>高级：后端地址</summary>
+                    <div class="nmcnative-field">
+                        <label for="nmcnativeBackendUrl">后端地址</label>
+                        <input id="nmcnativeBackendUrl" type="text" spellcheck="false">
+                    </div>
+                    <p class="nmcnative-note">一般无需修改，默认 /api/plugins/netease-music-native。</p>
+                </details>
             </section>
 
             <section id="nmcnativeQrPanel" class="nmcnative-qr" hidden>
@@ -4501,10 +5217,39 @@ function panelHtml() {
             </section>
 
             <section class="nmcnative-section" data-nmcnative-panel="player" data-active="true">
-                <p class="nmcnative-section-title">播放器</p>
+                <div id="nmcnativeNowPlaying" class="nmcnative-now-playing" data-playing="false">
+                    <div class="nmcnative-hero-head">
+                        <div class="nmcnative-disc" aria-hidden="true"><i class="fa-solid fa-music"></i></div>
+                        <div class="nmcnative-hero-copy">
+                            <p id="nmcnativePlayerSong" class="nmcnative-song-title">尚未载入歌曲</p>
+                            <p id="nmcnativePlayerArtist" class="nmcnative-song-artist">从下方歌单或搜索中选一首歌</p>
+                        </div>
+                    </div>
+                    <audio id="nmcnativePlayerAudio" preload="metadata"></audio>
+                    <div class="nmcnative-seek-row">
+                        <input id="nmcnativePlayerSeek" type="range" min="0" max="0" step="0.1" value="0" aria-label="播放进度">
+                        <span id="nmcnativePlayerTime" class="nmcnative-player-time">0:00 / 0:00</span>
+                    </div>
+                    <div class="nmcnative-transport">
+                        <button id="nmcnativePlayerPrevious" class="nmcnative-icon-button" type="button" title="上一首" aria-label="上一首"><i class="fa-solid fa-backward-step" aria-hidden="true"></i></button>
+                        <button id="nmcnativePlayerToggle" class="nmcnative-play-button" type="button" title="播放" aria-label="播放" disabled><i class="fa-solid fa-play" aria-hidden="true"></i></button>
+                        <button id="nmcnativePlayerNext" class="nmcnative-icon-button" type="button" title="下一首" aria-label="下一首"><i class="fa-solid fa-forward-step" aria-hidden="true"></i></button>
+                    </div>
+                    <div class="nmcnative-chip-row">
+                        <button id="nmcnativeLyricTranslationToggle" class="nmcnative-chip" type="button" aria-pressed="true" title="外语歌曲显示中文翻译"><i class="fa-solid fa-language" aria-hidden="true"></i> 中文翻译</button>
+                        <button id="nmcnativeFloatingLyricsToggle" class="nmcnative-chip" type="button" aria-pressed="false" title="在页面上显示悬浮歌词"><i class="fa-solid fa-closed-captioning" aria-hidden="true"></i> 悬浮歌词</button>
+                        <button id="nmcnativePlayTogetherSong" class="nmcnative-chip" type="button" title="播放一起听房间里的当前歌曲"><i class="fa-solid fa-user-group" aria-hidden="true"></i> 同步一起听</button>
+                    </div>
+                </div>
+
+                <div id="nmcnativePlayerLyrics" class="nmcnative-lyrics">
+                    <p class="nmcnative-lyrics-empty">播放或选择歌曲后显示歌词</p>
+                </div>
+
+                <p class="nmcnative-subsection-title"><i class="fa-solid fa-compact-disc" aria-hidden="true"></i> 选歌</p>
                 <div class="nmcnative-source-switch" role="tablist" aria-label="歌曲来源">
-                    <button id="nmcnativeSourcePlaylist" class="nmcnative-source-button active" type="button" data-nmcnative-player-source="playlist" aria-selected="true">从歌单</button>
-                    <button id="nmcnativeSourceSearch" class="nmcnative-source-button" type="button" data-nmcnative-player-source="search" aria-selected="false">搜索</button>
+                    <button id="nmcnativeSourcePlaylist" class="nmcnative-source-button active" type="button" data-nmcnative-player-source="playlist" aria-selected="true"><i class="fa-solid fa-list-ul" aria-hidden="true"></i> 我的歌单</button>
+                    <button id="nmcnativeSourceSearch" class="nmcnative-source-button" type="button" data-nmcnative-player-source="search" aria-selected="false"><i class="fa-solid fa-magnifying-glass" aria-hidden="true"></i> 搜索歌曲</button>
                 </div>
 
                 <div data-nmcnative-player-source-panel="playlist" data-active="true">
@@ -4519,7 +5264,7 @@ function panelHtml() {
                     <select id="nmcnativePlayerPlaylist" hidden aria-hidden="true">
                         <option value="">— 刷新歌单后选择 —</option>
                     </select>
-                    <p class="nmcnative-subsection-title">歌曲列表</p>
+                    <p class="nmcnative-minor-title">歌曲列表</p>
                     <div class="nmcnative-field">
                         <label for="nmcnativePlayerTrackSearch">筛选歌曲</label>
                         <input id="nmcnativePlayerTrackSearch" type="search" placeholder="歌曲、歌手或专辑">
@@ -4549,27 +5294,9 @@ function panelHtml() {
                     </div>
                 </div>
 
-                <div class="nmcnative-now-playing">
-                    <p id="nmcnativePlayerSong" class="nmcnative-status-line">尚未载入歌曲</p>
-                    <audio id="nmcnativePlayerAudio" preload="metadata"></audio>
-                    <div class="nmcnative-player-controls">
-                        <button id="nmcnativePlayerToggle" type="button" disabled>播放</button>
-                        <input id="nmcnativePlayerSeek" type="range" min="0" max="0" step="0.1" value="0" aria-label="播放进度">
-                        <span id="nmcnativePlayerTime" class="nmcnative-player-time">0:00 / 0:00</span>
-                    </div>
-                    <div class="nmcnative-actions" style="margin-top:8px">
-                        <button id="nmcnativePlayerPrevious" type="button">上一首</button>
-                        <button id="nmcnativePlayerNext" type="button">下一首</button>
-                        <button id="nmcnativePlayTogetherSong" class="nmcnative-wide-button" type="button">播放一起听当前歌曲</button>
-                    </div>
-                </div>
-
-                <div id="nmcnativePlayerLyrics" class="nmcnative-lyrics">
-                    <p class="nmcnative-lyrics-empty">播放或选择歌曲后显示歌词</p>
-                </div>
-
+                <p class="nmcnative-subsection-title"><i class="fa-solid fa-sliders" aria-hidden="true"></i> 更多</p>
                 <details class="nmcnative-details">
-                    <summary>歌曲评论</summary>
+                    <summary><i class="fa-regular fa-comment-dots" aria-hidden="true"></i> 歌曲评论</summary>
                     <div class="nmcnative-actions">
                         <button id="nmcnativeLoadSongComments" type="button">读取评论</button>
                         <button id="nmcnativeCharacterSongComment" type="button" data-nmcnative-char-template="以 {char} 身份评论">以角色身份评论</button>
@@ -4586,6 +5313,8 @@ function panelHtml() {
                     <div class="nmcnative-toggle-grid">
                         <label class="nmcnative-toggle"><input id="nmcnativeContinuousPlayback" type="checkbox"> 连续播放</label>
                         <label class="nmcnative-toggle"><input id="nmcnativeCharacterAutoSelect" type="checkbox"> <span data-nmcnative-char-template="{char} 自动选下一首">角色自动选下一首</span></label>
+                        <label class="nmcnative-toggle"><input id="nmcnativeFloatingLyrics" type="checkbox"> 悬浮歌词</label>
+                        <label class="nmcnative-toggle"><input id="nmcnativeLyricTranslation" type="checkbox"> 显示歌词翻译</label>
                         <label class="nmcnative-toggle nmcnative-toggle-wide"><input id="nmcnativeConversationTools" type="checkbox"> <span data-nmcnative-char-template="允许 {char} 在对话中调用网易云工具">允许角色在对话中调用网易云工具</span></label>
                     </div>
                     <p class="nmcnative-note" data-nmcnative-char-template="{char} 的后台生成会沿用当前 SillyTavern 预设，并完整读取绑定的主世界书与附加世界书。对话工具仍需在 SillyTavern 的 Function Calling 设置中启用。">角色的后台生成会沿用当前 SillyTavern 预设，并完整读取绑定的主世界书与附加世界书。对话工具仍需在 SillyTavern 的 Function Calling 设置中启用。</p>
@@ -4628,36 +5357,31 @@ function panelHtml() {
             </section>
 
             <section id="nmcnativeTogetherSection" class="nmcnative-section" data-nmcnative-panel="together" data-active="false">
-                <p class="nmcnative-section-title">一起听</p>
+                <p id="nmcnativeTogetherDisabled" class="nmcnative-module-disabled">一起听当前未启用。将 config.json 中的 enableTogetherListen 改为 true 并重启 SillyTavern 后即可使用。</p>
                 <div class="nmcnative-room-card">
-                    <p id="nmcnativeTogetherRoom" class="nmcnative-status-line">未加入房间</p>
-                    <p id="nmcnativeTogetherSong" class="nmcnative-status-line">暂无歌曲信息</p>
+                    <div class="nmcnative-room-head">
+                        <span class="nmcnative-room-icon" aria-hidden="true"><i class="fa-solid fa-user-group"></i></span>
+                        <div class="nmcnative-hero-copy">
+                            <p id="nmcnativeTogetherRoom" class="nmcnative-song-title">未加入房间</p>
+                            <p id="nmcnativeTogetherSong" class="nmcnative-song-artist">暂无歌曲信息</p>
+                        </div>
+                    </div>
+                    <div class="nmcnative-transport">
+                        <button id="nmcnativeTogetherPrevious" class="nmcnative-icon-button" type="button" title="房间上一首" aria-label="房间上一首"><i class="fa-solid fa-backward-step" aria-hidden="true"></i></button>
+                        <button id="nmcnativeTogetherToggle" class="nmcnative-play-button" type="button" title="暂停/播放" aria-label="暂停/播放"><i class="fa-solid fa-play" aria-hidden="true"></i><i class="fa-solid fa-pause" aria-hidden="true"></i></button>
+                        <button id="nmcnativeTogetherNext" class="nmcnative-icon-button" type="button" title="房间下一首" aria-label="房间下一首"><i class="fa-solid fa-forward-step" aria-hidden="true"></i></button>
+                    </div>
                     <p id="nmcnativeTogetherServiceState" class="nmcnative-status-line">当前创建方式：本地逆向</p>
                 </div>
-                <p id="nmcnativeTogetherDisabled" class="nmcnative-module-disabled">一起听当前未启用。将 config.json 中的 enableTogetherListen 改为 true 并重启 SillyTavern 后即可使用。</p>
                 <div class="nmcnative-actions">
-                    <button id="nmcnativeCreateRoom" class="nmcnative-primary" type="button">创建房间</button>
-                    <button id="nmcnativeToggleSongPolling" type="button">刷新当前歌曲</button>
-                    <button id="nmcnativeSpeakSong" type="button" data-nmcnative-char-template="让 {char} 私信说说这首歌">让角色说说这首歌</button>
-                    <button id="nmcnativeLeaveRoom" type="button">离开房间</button>
-                </div>
-                <div class="nmcnative-row" style="margin-top:8px">
-                    <div class="nmcnative-field">
-                        <label for="nmcnativeTogetherMode">创建方式</label>
-                        <select id="nmcnativeTogetherMode">
-                            <option value="local">本地逆向</option>
-                            <option value="native">独立原生服务</option>
-                        </select>
-                    </div>
+                    <button id="nmcnativeCreateRoom" class="nmcnative-primary" type="button"><i class="fa-solid fa-plus" aria-hidden="true"></i> 创建房间</button>
+                    <button id="nmcnativeLeaveRoom" class="nmcnative-danger" type="button"><i class="fa-solid fa-door-open" aria-hidden="true"></i> 离开房间</button>
+                    <button id="nmcnativeToggleSongPolling" type="button"><i class="fa-solid fa-rotate" aria-hidden="true"></i> 刷新当前歌曲</button>
+                    <button id="nmcnativeRefreshRoomPlaylist" type="button"><i class="fa-solid fa-list" aria-hidden="true"></i> 刷新房间歌单</button>
+                    <button id="nmcnativeSpeakSong" class="nmcnative-wide-button" type="button" data-nmcnative-char-template="让 {char} 私信说说这首歌">让角色说说这首歌</button>
                 </div>
                 <p id="nmcnativeCharComment" class="nmcnative-status-line"></p>
-
-                <div class="nmcnative-actions">
-                    <button id="nmcnativeTogetherPrevious" type="button">上一首</button>
-                    <button id="nmcnativeTogetherToggle" type="button">暂停</button>
-                    <button id="nmcnativeTogetherNext" type="button">下一首</button>
-                    <button id="nmcnativeRefreshRoomPlaylist" class="nmcnative-wide-button" type="button">刷新房间歌单</button>
-                </div>
+                <p class="nmcnative-subsection-title"><i class="fa-solid fa-sliders" aria-hidden="true"></i> 房间与私信</p>
 
                 <details class="nmcnative-details">
                     <summary>房间歌单</summary>
@@ -4681,6 +5405,13 @@ function panelHtml() {
                 <details class="nmcnative-details">
                     <summary>邀请与加入</summary>
                     <div class="nmcnative-field">
+                        <label for="nmcnativeTogetherMode">创建方式</label>
+                        <select id="nmcnativeTogetherMode">
+                            <option value="local">本地逆向</option>
+                            <option value="native">独立原生服务</option>
+                        </select>
+                    </div>
+                    <div class="nmcnative-field">
                         <label for="nmcnativeTogetherLink">分享链接或房间 ID</label>
                         <input id="nmcnativeTogetherLink" type="text" spellcheck="false" placeholder="粘贴网易云一起听分享链接或房间 ID">
                     </div>
@@ -4691,7 +5422,7 @@ function panelHtml() {
                         <button id="nmcnativeCopyInvite" type="button" disabled>复制链接</button>
                         <button id="nmcnativeSendInviteDm" type="button">发送邀请到私信</button>
                     </div>
-                    <p class="nmcnative-note">支持当前分享链接和旧版房间 ID；创建方式可在房间卡片下方切换。</p>
+                    <p class="nmcnative-note">支持当前分享链接和旧版房间 ID。</p>
                 </details>
 
                 <details id="nmcnativeTogetherReplyDetails" class="nmcnative-details">
@@ -4719,7 +5450,15 @@ function panelHtml() {
             </section>
 
             <section class="nmcnative-section" data-nmcnative-panel="playlists" data-active="false">
-                <p class="nmcnative-section-title">歌单管理</p>
+                <div class="nmcnative-card nmcnative-intro-card">
+                    <p class="nmcnative-card-title"><i class="fa-solid fa-wand-magic-sparkles" aria-hidden="true"></i> <span data-nmcnative-char-template="让 {char} 帮你挑歌">让角色帮你挑歌</span></p>
+                    <p class="nmcnative-note">“新建歌单”按角色人设生成新歌单；先在下方选中一个歌单，再点“为当前歌单加歌”。</p>
+                    <div class="nmcnative-actions">
+                        <button id="nmcnativeCreateByPersona" class="nmcnative-primary" type="button"><i class="fa-solid fa-plus" aria-hidden="true"></i> 新建歌单</button>
+                        <button id="nmcnativeAddToCurrent" type="button"><i class="fa-solid fa-square-plus" aria-hidden="true"></i> 为当前歌单加歌</button>
+                    </div>
+                </div>
+                <p class="nmcnative-subsection-title"><i class="fa-solid fa-list-ul" aria-hidden="true"></i> 目标歌单</p>
                 <div class="nmcnative-field">
                     <label for="nmcnativeTargetPlaylistSearch">筛选目标歌单</label>
                     <input id="nmcnativeTargetPlaylistSearch" type="search" placeholder="歌单名或创建者">
@@ -4732,19 +5471,13 @@ function panelHtml() {
                         <option value="">— 选择一个已有歌单 —</option>
                 </select>
                 <p id="nmcnativeTargetPlaylistStatus" class="nmcnative-status-line">尚未选择目标歌单</p>
-                <div class="nmcnative-actions">
-                    <button id="nmcnativeCreateByPersona" class="nmcnative-primary" type="button">新建歌单</button>
-                    <button id="nmcnativeAddToCurrent" type="button">为当前歌单加歌</button>
-                </div>
             </section>
 
-            <section class="nmcnative-section nmcnative-readonly">
-                <p><strong>活动账号：</strong><span id="nmcnativeActiveLabel">—</span></p>
-                <p><strong>当前歌单：</strong><span id="nmcnativeCurrentPlaylist">未设置</span></p>
-                <p id="nmcnativeConnectionState" class="nmcnative-status-line">等待连接后端...</p>
-            </section>
-
-            <div id="nmcnativeOperationStatus" class="nmcnative-message">所有生成均在后台完成，不会写入聊天历史。</div>
+            <footer class="nmcnative-readonly">
+                <span title="活动账号"><i class="fa-solid fa-user" aria-hidden="true"></i> <span id="nmcnativeActiveLabel">—</span></span>
+                <span title="当前歌单"><i class="fa-solid fa-list-ul" aria-hidden="true"></i> <span id="nmcnativeCurrentPlaylist">未设置</span></span>
+                <span id="nmcnativeConnectionState" class="nmcnative-connection">等待连接后端...</span>
+            </footer>
                 </div>
             </div>
         </div>
@@ -4993,6 +5726,18 @@ function bindEvents() {
         extension_settings[EXTENSION_KEY].continuousPlayback = event.target.checked;
         saveSettingsDebounced();
     });
+    element('nmcnativeLyricTranslationToggle').addEventListener('click', () => {
+        setLyricTranslation(!lyricTranslationEnabled());
+    });
+    element('nmcnativeFloatingLyricsToggle').addEventListener('click', () => {
+        setFloatingLyrics(!floatingLyricsEnabled());
+    });
+    element('nmcnativeLyricTranslation').addEventListener('change', event => {
+        setLyricTranslation(event.target.checked);
+    });
+    element('nmcnativeFloatingLyrics').addEventListener('change', event => {
+        setFloatingLyrics(event.target.checked);
+    });
     element('nmcnativeCharacterAutoSelect').addEventListener('change', event => {
         extension_settings[EXTENSION_KEY].characterAutoSelect = event.target.checked;
         saveSettingsDebounced();
@@ -5026,8 +5771,14 @@ function bindEvents() {
     });
     element('nmcnativePlayerAudio').addEventListener('loadedmetadata', renderPlayerProgress);
     element('nmcnativePlayerAudio').addEventListener('durationchange', renderPlayerProgress);
-    element('nmcnativePlayerAudio').addEventListener('play', renderPlayerProgress);
-    element('nmcnativePlayerAudio').addEventListener('pause', renderPlayerProgress);
+    element('nmcnativePlayerAudio').addEventListener('play', () => {
+        renderPlayerProgress();
+        renderFloatingLyrics();
+    });
+    element('nmcnativePlayerAudio').addEventListener('pause', () => {
+        renderPlayerProgress();
+        renderFloatingLyrics();
+    });
     element('nmcnativePlayerAudio').addEventListener('ended', () => {
         void playNextPlayerSong({ automatic: true }).catch(error => {
             setMessage(error?.message || '自动播放下一首失败', 'error');
@@ -5093,7 +5844,7 @@ function bindEvents() {
         void withBusy('正在切换上一首...', () => controlTogetherRoom('previous'));
     });
     element('nmcnativeTogetherToggle').addEventListener('click', () => {
-        const command = element('nmcnativeTogetherToggle').textContent.includes('继续')
+        const command = element('nmcnativeTogetherToggle').dataset.paused === 'true'
             ? 'play'
             : 'pause';
         void withBusy('正在同步播放状态...', () => controlTogetherRoom(command));
@@ -5253,6 +6004,8 @@ async function initializePanel() {
     element('nmcnativeCharacterAutoSelect').checked = extension_settings[EXTENSION_KEY].characterAutoSelect;
     element('nmcnativeConversationTools').checked = extension_settings[EXTENSION_KEY].conversationTools;
     element('nmcnativeTogetherIncludeLyrics').checked = extension_settings[EXTENSION_KEY].includeTogetherLyrics;
+    updateLyricOptionControls();
+    renderFloatingLyrics();
     activateTab(extension_settings[EXTENSION_KEY].activeTab, { persist: false });
     activatePlayerSource(extension_settings[EXTENSION_KEY].playerSource, { persist: false });
     bindEvents();

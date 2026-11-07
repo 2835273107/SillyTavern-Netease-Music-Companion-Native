@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.13.0
+
+- Reorganized the panel into clearer sections with icon tabs, section titles
+  and grouped secondary options, plus larger touch targets on mobile.
+- Added a draggable floating lyrics bar with play/pause, next song,
+  translation toggle and close controls. Double-click the bar to reset its
+  position; the position is remembered.
+- Foreign-language lyrics show the original line and Chinese translation
+  together; translation can be turned off. Chinese songs show the lyric line
+  with the next line as a preview.
+
 ## 1.12.8
 
 - QR login polling now continues while the browser is backgrounded, so scanning
