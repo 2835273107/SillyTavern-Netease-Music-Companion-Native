@@ -31,7 +31,9 @@ const state = {
     currentSong: null,
     loginPollTimer: null,
     loginPollToken: 0,
+    loginPollBusy: false,
     togetherPollTimer: null,
+    togetherPollBusy: false,
     togetherPollFailures: 0,
     messagePollTimer: null,
     messagePollBusy: false,
@@ -48,8 +50,10 @@ const state = {
     playerQueueIndex: -1,
     playerAutoAdvancing: false,
     lyricLines: [],
+    lyricTimes: [],
     lyricCache: new Map(),
     lyricIndex: -1,
+    playerLoadToken: 0,
     roomPlaylist: [],
     roomPlaylistCurrentId: '',
     comments: [],
@@ -61,7 +65,6 @@ const state = {
     commentedSongIds: new Set(),
     commentingSongIds: new Set(),
     characterNameListeners: [],
-    panelObserver: null,
 };
 
 function initializeSettings() {
@@ -276,12 +279,35 @@ function setConnectionState(text, kind = 'info') {
     node.dataset.kind = kind;
 }
 
-async function api(path, { method = 'GET', body } = {}) {
-    const response = await fetch(`${backendBase()}${path}`, {
-        method,
-        headers: getRequestHeaders(),
-        body: body === undefined ? undefined : JSON.stringify(body),
-    });
+const API_DEFAULT_TIMEOUT_MS = 150_000;
+const API_POLL_TIMEOUT_MS = 15_000;
+const LYRIC_CACHE_LIMIT = 80;
+
+function rememberLyrics(songId, lyrics) {
+    state.lyricCache.delete(songId);
+    state.lyricCache.set(songId, lyrics);
+    while (state.lyricCache.size > LYRIC_CACHE_LIMIT) {
+        state.lyricCache.delete(state.lyricCache.keys().next().value);
+    }
+}
+
+async function api(path, { method = 'GET', body, timeoutMs = API_DEFAULT_TIMEOUT_MS } = {}) {
+    let response;
+    try {
+        response = await fetch(`${backendBase()}${path}`, {
+            method,
+            headers: getRequestHeaders(),
+            body: body === undefined ? undefined : JSON.stringify(body),
+            signal: timeoutMs > 0 && typeof AbortSignal?.timeout === 'function'
+                ? AbortSignal.timeout(timeoutMs)
+                : undefined,
+        });
+    } catch (error) {
+        if (error?.name === 'TimeoutError' || error?.name === 'AbortError') {
+            throw new Error(`请求超时（${Math.round(timeoutMs / 1000)} 秒），请检查后端插件是否正常运行`);
+        }
+        throw new Error(`无法连接后端插件：${error?.message || error}`);
+    }
     let payload;
     try {
         payload = await response.json();
@@ -774,8 +800,9 @@ async function refreshStatus({ silent = false } = {}) {
 
 function stopLoginPolling() {
     state.loginPollToken += 1;
+    state.loginPollBusy = false;
     if (state.loginPollTimer) {
-        clearInterval(state.loginPollTimer);
+        clearTimeout(state.loginPollTimer);
         state.loginPollTimer = null;
     }
 }
@@ -793,12 +820,21 @@ function closeQrPanel() {
 }
 
 async function checkQr(key, targetAccountId, token) {
+    if (token !== state.loginPollToken || state.loginPollBusy) {
+        return;
+    }
+    state.loginPollBusy = true;
+    let keepPolling = true;
     try {
-        const result = await api(`/login/qr/check?key=${encodeURIComponent(key)}&targetAccountId=${encodeURIComponent(targetAccountId)}`);
+        const result = await api(
+            `/login/qr/check?key=${encodeURIComponent(key)}&targetAccountId=${encodeURIComponent(targetAccountId)}`,
+            { timeoutMs: API_POLL_TIMEOUT_MS },
+        );
         if (token !== state.loginPollToken) {
             return;
         }
         if (result.code === 803) {
+            keepPolling = false;
             stopLoginPolling();
             closeQrPanel();
             setMessage(`账号 ${accountName(targetAccountId)} 登录成功。`, 'success');
@@ -806,11 +842,31 @@ async function checkQr(key, targetAccountId, token) {
             await Promise.allSettled([refreshCurrentPlaylist(), refreshPlaylists()]);
             return;
         }
+        if (result.code === 800) {
+            keepPolling = false;
+            stopLoginPolling();
+            setText('nmcnativeQrStatus', '二维码已过期，请点击“刷新二维码”重新生成');
+            return;
+        }
         setText('nmcnativeQrStatus', result.message || '等待登录');
     } catch (error) {
+        keepPolling = false;
+        if (token !== state.loginPollToken) {
+            return;
+        }
         stopLoginPolling();
         setText('nmcnativeQrStatus', error?.message || String(error));
         setMessage(error?.message || String(error), 'error');
+    } finally {
+        if (token === state.loginPollToken) {
+            state.loginPollBusy = false;
+            if (keepPolling) {
+                state.loginPollTimer = setTimeout(
+                    () => checkQr(key, targetAccountId, token),
+                    2000,
+                );
+            }
+        }
     }
 }
 
@@ -836,7 +892,7 @@ async function showQrLogin() {
 
     stopLoginPolling();
     const token = state.loginPollToken;
-    state.loginPollTimer = setInterval(
+    state.loginPollTimer = setTimeout(
         () => checkQr(result.key, result.targetAccountId, token),
         2000,
     );
@@ -1066,7 +1122,7 @@ async function getSongLyricsText(song, { maxChars = 0 } = {}) {
             }
         }
         if (lyrics) {
-            state.lyricCache.set(songId, lyrics);
+            rememberLyrics(songId, lyrics);
         }
     }
     return Number(maxChars) > 0 ? lyrics.slice(0, maxChars) : lyrics;
@@ -1097,6 +1153,7 @@ function renderPlayerLyrics() {
         return;
     }
     state.lyricIndex = -1;
+    state.lyricTimes = state.lyricLines.map(line => line.time);
     container.replaceChildren();
     if (!state.lyricLines.length) {
         const empty = document.createElement('p');
@@ -1105,6 +1162,7 @@ function renderPlayerLyrics() {
         container.append(empty);
         return;
     }
+    const fragment = document.createDocumentFragment();
     state.lyricLines.forEach((line, index) => {
         const row = document.createElement('button');
         row.type = 'button';
@@ -1118,14 +1176,27 @@ function renderPlayerLyrics() {
             translation.textContent = line.translation;
             row.append(translation);
         }
-        row.addEventListener('click', () => {
-            const audio = element('nmcnativePlayerAudio');
-            if (audio && Number.isFinite(line.time)) {
-                audio.currentTime = line.time;
-            }
-        });
-        container.append(row);
+        fragment.append(row);
     });
+    container.append(fragment);
+    syncPlayerLyrics();
+}
+
+function findLyricIndex(currentTime) {
+    const times = state.lyricTimes;
+    let low = 0;
+    let high = times.length - 1;
+    let found = -1;
+    while (low <= high) {
+        const middle = (low + high) >> 1;
+        if (times[middle] <= currentTime + 0.08) {
+            found = middle;
+            low = middle + 1;
+        } else {
+            high = middle - 1;
+        }
+    }
+    return found;
 }
 
 function syncPlayerLyrics() {
@@ -1133,26 +1204,29 @@ function syncPlayerLyrics() {
     if (!audio || !state.lyricLines.length) {
         return;
     }
-    const currentTime = Number(audio.currentTime) || 0;
-    let nextIndex = -1;
-    for (let index = 0; index < state.lyricLines.length; index += 1) {
-        if (state.lyricLines[index].time <= currentTime + 0.08) {
-            nextIndex = index;
-        } else {
-            break;
-        }
-    }
+    const nextIndex = findLyricIndex(Number(audio.currentTime) || 0);
     if (nextIndex === state.lyricIndex) {
         return;
     }
+    const previousIndex = state.lyricIndex;
     state.lyricIndex = nextIndex;
     const container = element('nmcnativePlayerLyrics');
     if (!container) {
         return;
     }
-    container.querySelectorAll('.nmcnative-lyric-line').forEach((row, index) => {
-        row.classList.toggle('active', index === nextIndex);
-    });
+    container.children[previousIndex]?.classList.remove('active');
+    const activeRow = container.children[nextIndex];
+    if (!activeRow) {
+        return;
+    }
+    activeRow.classList.add('active');
+    if (container.offsetParent !== null) {
+        const rowRect = activeRow.getBoundingClientRect();
+        const containerRect = container.getBoundingClientRect();
+        const targetTop = container.scrollTop + rowRect.top - containerRect.top
+            - (container.clientHeight - rowRect.height) / 2;
+        container.scrollTop = Math.max(0, targetTop);
+    }
 }
 
 function formatPlaybackTime(value) {
@@ -1185,6 +1259,7 @@ async function loadPlayerSong(song, { autoplay = false, queue = null } = {}) {
     if (!song?.id) {
         throw new Error('缺少歌曲 ID');
     }
+    const loadToken = ++state.playerLoadToken;
     state.playerSong = {
         id: String(song.id),
         name: String(song.name || song.songName || song.song_name || '未知歌曲'),
@@ -1215,21 +1290,35 @@ async function loadPlayerSong(song, { autoplay = false, queue = null } = {}) {
     if (autoplay) {
         try {
             await audio.play();
-            setMessage(`正在酒馆中播放《${state.playerSong.name}》。`, 'success');
+            if (loadToken === state.playerLoadToken) {
+                setMessage(`正在酒馆中播放《${state.playerSong.name}》。`, 'success');
+            }
         } catch {
-            setMessage('浏览器阻止了自动播放，请点击播放器上的播放按钮。', 'info');
+            if (loadToken === state.playerLoadToken) {
+                setMessage('浏览器阻止了自动播放，请点击播放器上的播放按钮。', 'info');
+            }
         }
+    }
+    if (loadToken !== state.playerLoadToken) {
+        return;
     }
     state.lyricLines = [];
     renderPlayerLyrics();
     try {
-        const lyric = await api(`/lyric?song_id=${encodeURIComponent(state.playerSong.id)}`);
-        if (audio.dataset.songId === state.playerSong.id) {
+        const songId = state.playerSong.id;
+        const lyric = await api(`/lyric?song_id=${encodeURIComponent(songId)}`, { timeoutMs: 30_000 });
+        if (loadToken === state.playerLoadToken && audio.dataset.songId === songId) {
             state.lyricLines = parseLrc(lyric.lyric, lyric.translated);
             renderPlayerLyrics();
+            const lyricsText = lyricLinesAsText(state.lyricLines);
+            if (lyricsText) {
+                rememberLyrics(songId, lyricsText);
+            }
         }
     } catch (error) {
-        setMessage(error?.message || '歌词读取失败', 'error');
+        if (loadToken === state.playerLoadToken) {
+            setMessage(error?.message || '歌词读取失败', 'error');
+        }
     }
 }
 
@@ -1925,7 +2014,8 @@ async function pollTogetherMessagesOnce() {
     }
     const section = element('nmcnativeTogetherSection');
     const details = element('nmcnativeTogetherReplyDetails');
-    if (!details?.open || section?.dataset.active !== 'true' || section?.hidden) {
+    if (document.hidden || !panelVisible()
+        || !details?.open || section?.dataset.active !== 'true' || section?.hidden) {
         return;
     }
     state.messagePollBusy = true;
@@ -2783,7 +2873,7 @@ async function refreshNativeServiceState({ start = false } = {}) {
     }
 }
 
-async function refreshCurrentTogetherSong({ startNative = false } = {}) {
+async function refreshCurrentTogetherSong({ startNative = false, timeoutMs = API_DEFAULT_TIMEOUT_MS } = {}) {
     const mode = element('nmcnativeTogetherMode')?.value || 'local';
     const errors = [];
     const applyRefreshedSong = song => {
@@ -2800,7 +2890,7 @@ async function refreshCurrentTogetherSong({ startNative = false } = {}) {
             if (startNative) {
                 await api('/together/native/start', { method: 'POST', body: {} });
             }
-            const song = await api('/together/native/now-playing');
+            const song = await api('/together/native/now-playing', { timeoutMs });
             applyRefreshedSong(song);
             state.togetherPollFailures = 0;
             await refreshNativeServiceState().catch(() => {});
@@ -2810,7 +2900,7 @@ async function refreshCurrentTogetherSong({ startNative = false } = {}) {
         }
     }
     try {
-        const song = await api('/together/now-playing');
+        const song = await api('/together/now-playing', { timeoutMs });
         applyRefreshedSong(song);
         state.togetherPollFailures = 0;
         return song;
@@ -2823,14 +2913,25 @@ async function refreshCurrentTogetherSong({ startNative = false } = {}) {
 }
 
 async function pollTogetherSongOnce() {
+    if (state.togetherPollBusy || document.hidden || !panelVisible()) {
+        return;
+    }
+    state.togetherPollBusy = true;
     try {
-        await refreshCurrentTogetherSong();
+        await refreshCurrentTogetherSong({ timeoutMs: API_POLL_TIMEOUT_MS });
     } catch (error) {
         state.togetherPollFailures += 1;
         if (state.togetherPollFailures === 1 || state.togetherPollFailures % 5 === 0) {
             setMessage(error?.message || String(error), 'error');
         }
+    } finally {
+        state.togetherPollBusy = false;
     }
+}
+
+function panelVisible() {
+    const panel = element('netease-music-companion-native');
+    return Boolean(panel && panel.offsetParent !== null);
 }
 
 function startTogetherPolling({ pollNow = true } = {}) {
@@ -4915,6 +5016,14 @@ function bindEvents() {
         renderPlayerProgress();
     });
     element('nmcnativePlayerAudio').addEventListener('seeked', syncPlayerLyrics);
+    element('nmcnativePlayerLyrics')?.addEventListener('click', event => {
+        const row = event.target.closest?.('.nmcnative-lyric-line');
+        const audio = element('nmcnativePlayerAudio');
+        const time = Number(row?.dataset.time);
+        if (row && audio?.src && Number.isFinite(time)) {
+            audio.currentTime = time;
+        }
+    });
     element('nmcnativePlayerAudio').addEventListener('loadedmetadata', renderPlayerProgress);
     element('nmcnativePlayerAudio').addEventListener('durationchange', renderPlayerProgress);
     element('nmcnativePlayerAudio').addEventListener('play', renderPlayerProgress);
@@ -5117,29 +5226,15 @@ function bindEvents() {
     });
 
     document.addEventListener('visibilitychange', () => {
-        if (document.hidden) {
-            stopLoginPolling();
-            stopTogetherPolling();
-            stopMessagePolling();
-        } else if (extension_settings[EXTENSION_KEY]?.activeTab === 'together') {
-            startMessagePolling();
+        if (!document.hidden && extension_settings[EXTENSION_KEY]?.activeTab === 'together') {
+            if (state.messagePollTimer) {
+                void pollTogetherMessagesOnce();
+            }
+            if (state.togetherPollTimer) {
+                void pollTogetherSongOnce();
+            }
         }
     });
-
-    if (!state.panelObserver) {
-        state.panelObserver = new MutationObserver(() => {
-            const panel = element('netease-music-companion-native');
-            if (panel && panel.offsetParent === null) {
-                stopTogetherPolling();
-                stopMessagePolling();
-            }
-        });
-        state.panelObserver.observe(document.body, {
-            subtree: true,
-            attributes: true,
-            attributeFilter: ['class', 'style', 'hidden'],
-        });
-    }
 }
 
 async function initializePanel() {

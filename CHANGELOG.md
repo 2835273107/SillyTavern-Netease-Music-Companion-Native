@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.12.8
+
+- QR login polling now continues while the browser is backgrounded, so scanning
+  with the phone app no longer silently stops login detection; expired QR codes
+  are reported and polling stops.
+- Polling requests no longer overlap, use a shorter timeout and pause work
+  while the page or panel is hidden instead of being permanently stopped.
+- Removed the page-wide MutationObserver that ran on every class/style change
+  in SillyTavern.
+- Frontend API calls now time out with a readable error instead of hanging.
+- Lyric sync uses binary search, updates only the changed rows and keeps the
+  active line centered; lyric rows share one delegated click handler.
+- Fixed stale lyrics/messages when switching songs quickly, and bounded the
+  lyric cache.
+
 ## 1.12.7
 
 - Expanded duplicate-song detection to canonical title matching.
